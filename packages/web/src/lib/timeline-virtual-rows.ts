@@ -22,6 +22,11 @@ export const TIMELINE_VIRTUALIZER_DEFAULTS = {
   followOnAppend: "auto",
   scrollEndThreshold: 100,
   useAnimationFrameWithResizeObserver: true,
+  // measureElement runs as a ref callback inside React's commit phase, and its
+  // synchronous notify would call flushSync there (the flushSync-in-lifecycle
+  // warning). Rerender through the normal scheduler instead; the resize
+  // observer path already defers via requestAnimationFrame.
+  useFlushSync: false,
 } as const;
 
 export function buildTimelineVirtualRows({
