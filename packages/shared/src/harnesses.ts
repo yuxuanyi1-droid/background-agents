@@ -20,7 +20,7 @@ import type {
   SessionProviderAuthMode,
 } from "./types/provider-accounts";
 
-export const HARNESS_IDS = ["opencode", "claude"] as const;
+export const HARNESS_IDS = ["opencode", "claude", "codex", "pi", "dsh", "zcode"] as const;
 export type HarnessId = (typeof HARNESS_IDS)[number];
 export const DEFAULT_HARNESS: HarnessId = "opencode";
 export const harnessIdSchema = z.enum(HARNESS_IDS);
@@ -52,6 +52,42 @@ export const HARNESS_CATALOG = {
     modelFamilies: ["anthropic"],
     providerAuth: {
       anthropic: ["api_key", "provider_account"],
+    },
+    resume: "session_id",
+  },
+  codex: {
+    label: "Codex",
+    modelFamilies: ["openai"],
+    providerAuth: {
+      openai: ["api_key"],
+    },
+    resume: "session_id",
+  },
+  pi: {
+    label: "Pi",
+    modelFamilies: "any",
+    providerAuth: {
+      anthropic: ["api_key"],
+      openai: ["api_key"],
+      xai: ["api_key"],
+      deepseek: ["api_key"],
+      "zai-coding-plan": ["api_key"],
+    },
+    resume: "session_id",
+  },
+  dsh: {
+    label: "DeepSeek Harness",
+    modelFamilies: ["deepseek"],
+    providerAuth: {
+      deepseek: ["api_key"],
+    },
+    resume: "session_id",
+  },
+  zcode: {
+    label: "ZCode",
+    modelFamilies: ["zai-coding-plan"],
+    providerAuth: {
+      "zai-coding-plan": ["api_key"],
     },
     resume: "session_id",
   },

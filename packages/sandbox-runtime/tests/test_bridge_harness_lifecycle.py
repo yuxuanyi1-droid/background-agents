@@ -168,8 +168,12 @@ class TestHarnessContracts:
         assert parse_harness_id(None) is HarnessId.OPENCODE
         assert parse_harness_id("opencode") is HarnessId.OPENCODE
         assert parse_harness_id("claude") is HarnessId.CLAUDE
-        with pytest.raises(ValueError, match="Unsupported harness: 'codex'"):
-            parse_harness_id("codex")
+        assert parse_harness_id("codex") is HarnessId.CODEX
+        assert parse_harness_id("pi") is HarnessId.PI
+        assert parse_harness_id("dsh") is HarnessId.DSH
+        assert parse_harness_id("zcode") is HarnessId.ZCODE
+        with pytest.raises(ValueError, match="Unsupported harness: 'not-a-harness'"):
+            parse_harness_id("not-a-harness")
 
     def test_turn_outcome_rejects_contradictions(self) -> None:
         with pytest.raises(ValueError, match="cancelled"):

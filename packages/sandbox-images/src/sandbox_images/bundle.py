@@ -78,8 +78,18 @@ def validate_toolchain(tools: dict[str, Any]) -> None:
         raise ValueError("Unsupported image toolchain schema")
     if version(tools["opencode"]) < version(tools["opencodeMinimum"]):
         raise ValueError("OpenCode is below the image toolchain minimum")
-    for name in ("agentBrowser", "pnpm", "bun", "zod", "python"):
+    for name in ("agentBrowser", "pnpm", "bun", "zod", "python", "codex", "pi"):
         version(tools[name])
+    # DeepSeek Harness ships only prerelease npm tags; its pin carries the
+    # official prerelease suffix and is the one tool allowed to.
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+){2,3}-(?:alpha|beta|rc)\.\d+", tools.get("dsh", "")):
+        raise ValueError(f"DeepSeek Harness must pin an official prerelease: {tools.get('dsh')}")
+    # ZCode has no npm distribution: its CLI is built from a SHA-pinned source
+    # tarball, and the bundle reports its own package version, not the tag's.
+    version(tools["zcode"])
+    version(tools["zcodeCli"])
+    if not re.fullmatch(r"[a-f0-9]{64}", tools.get("zcodeSha256", "")):
+        raise ValueError("ZCode source tarball must have a SHA-256 pin")
     if not re.fullmatch(r"[a-f0-9]{64}", tools.get("agentBrowserSha256", "")):
         raise ValueError("agent-browser native binary must have a SHA-256 pin")
     archives = [
@@ -208,6 +218,8 @@ def pack_bundle(root: Path, provider: str, output_root: Path) -> PackedBundle:
             "PYTHON_VERSION": toolchain["python"],
             "AGENT_BROWSER_VERSION": toolchain["agentBrowser"],
             "AGENT_BROWSER_SHA256": toolchain["agentBrowserSha256"],
+            "ZCODE_VERSION": toolchain["zcode"],
+            "ZCODE_SHA256": toolchain["zcodeSha256"],
         }
         for name, key in (
             ("NODE", "node"),

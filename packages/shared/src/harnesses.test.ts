@@ -16,7 +16,7 @@ import { VALID_MODELS } from "./models";
 
 describe("harness catalog", () => {
   it("lists only harnesses the runtime can boot, built-in first", () => {
-    expect(HARNESS_IDS).toEqual(["opencode", "claude"]);
+    expect(HARNESS_IDS).toEqual(["opencode", "claude", "codex", "pi", "dsh", "zcode"]);
     expect(DEFAULT_HARNESS).toBe("opencode");
   });
 
@@ -27,10 +27,11 @@ describe("harness catalog", () => {
   it("resolves an absent or unknown harness to the default", () => {
     expect(getValidHarnessOrDefault(undefined)).toBe("opencode");
     expect(getValidHarnessOrDefault(null)).toBe("opencode");
-    expect(getValidHarnessOrDefault("codex")).toBe("opencode");
+    expect(getValidHarnessOrDefault("not-a-harness")).toBe("opencode");
     expect(getValidHarnessOrDefault("claude")).toBe("claude");
+    expect(getValidHarnessOrDefault("codex")).toBe("codex");
     expect(isValidHarness("claude")).toBe(true);
-    expect(isValidHarness("codex")).toBe(false);
+    expect(isValidHarness("not-a-harness")).toBe(false);
     expect(isValidHarness(42)).toBe(false);
   });
 });
@@ -47,6 +48,21 @@ describe("harnessSupportsModel", () => {
     expect(harnessSupportsModel("claude", "claude-sonnet-4-6")).toBe(true);
     expect(harnessSupportsModel("claude", "openai/gpt-5.5")).toBe(false);
     expect(harnessSupportsModel("claude", "xai/grok-4.6")).toBe(false);
+  });
+
+  it("routes each vendor harness to the models its vendor serves", () => {
+    expect(harnessSupportsModel("codex", "openai/gpt-5.5")).toBe(true);
+    expect(harnessSupportsModel("codex", "anthropic/claude-sonnet-4-6")).toBe(false);
+    expect(harnessSupportsModel("dsh", "deepseek/deepseek-v4-pro")).toBe(true);
+    expect(harnessSupportsModel("dsh", "openai/gpt-5.5")).toBe(false);
+    expect(harnessSupportsModel("zcode", "zai-coding-plan/glm-5.3")).toBe(true);
+    expect(harnessSupportsModel("zcode", "openai/gpt-5.5")).toBe(false);
+  });
+
+  it("lets Pi run every catalog model", () => {
+    for (const model of VALID_MODELS) {
+      expect(harnessSupportsModel("pi", model)).toBe(true);
+    }
   });
 
   it("filters a model list by harness", () => {
@@ -73,6 +89,17 @@ describe("harnessSupportsProviderAuth", () => {
   it("keeps OpenAI and xAI provider accounts on OpenCode", () => {
     expect(harnessSupportsProviderAuth("opencode", "openai", "provider_account")).toBe(true);
     expect(harnessSupportsProviderAuth("opencode", "xai", "provider_account")).toBe(true);
+  });
+
+  it("restricts the API-key-only harnesses to API-key auth", () => {
+    expect(harnessSupportsProviderAuth("codex", "openai", "api_key")).toBe(true);
+    expect(harnessSupportsProviderAuth("codex", "openai", "provider_account")).toBe(false);
+    expect(harnessSupportsProviderAuth("dsh", "deepseek", "api_key")).toBe(true);
+    expect(harnessSupportsProviderAuth("dsh", "deepseek", "provider_account")).toBe(false);
+    expect(harnessSupportsProviderAuth("zcode", "zai-coding-plan", "api_key")).toBe(true);
+    expect(harnessSupportsProviderAuth("zcode", "zai-coding-plan", "provider_account")).toBe(false);
+    expect(harnessSupportsProviderAuth("pi", "deepseek", "api_key")).toBe(true);
+    expect(harnessSupportsProviderAuth("pi", "google", "api_key")).toBe(false);
   });
 
   it("selects no auth mode for a provider the harness has no row for", () => {
