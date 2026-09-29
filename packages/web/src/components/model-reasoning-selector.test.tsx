@@ -54,6 +54,16 @@ const items = [
       },
     ],
   },
+  {
+    category: "My Gateway (custom)",
+    models: [
+      {
+        id: "cpo-1a2b3c4d/gpt-5.6-luna",
+        name: "Gateway Luna",
+        description: "My Gateway · OpenAI-compatible protocol",
+      },
+    ],
+  },
 ] satisfies ModelCategory[];
 
 describe("ModelReasoningSelector", () => {
@@ -270,6 +280,38 @@ describe("ModelReasoningSelector", () => {
     expect(screen.getByRole("menuitemradio", { name: /claude sonnet 4.6/i })).toHaveAttribute(
       "aria-checked",
       "true"
+    );
+  });
+
+  it("shows a custom provider model's display name on the trigger", () => {
+    render(
+      <ModelReasoningSelector
+        selectedModel="cpo-1a2b3c4d/gpt-5.6-luna"
+        reasoningEffort={undefined}
+        items={items}
+        onModelChange={vi.fn()}
+        onReasoningEffortChange={vi.fn()}
+      />
+    );
+
+    const trigger = screen.getByRole("button", { name: /model and effort/i });
+    expect(trigger).toHaveTextContent("gateway luna");
+    expect(trigger).not.toHaveTextContent("cpo-1a2b3c4d");
+  });
+
+  it("falls back to the raw model ID when the selection is missing from the options", () => {
+    render(
+      <ModelReasoningSelector
+        selectedModel="cpa-1a2b3c4d/vanished-gateway-model"
+        reasoningEffort={undefined}
+        items={items}
+        onModelChange={vi.fn()}
+        onReasoningEffortChange={vi.fn()}
+      />
+    );
+
+    expect(screen.getByRole("button", { name: /model and effort/i })).toHaveTextContent(
+      "cpa-1a2b3c4d/vanished-gateway-model"
     );
   });
 });

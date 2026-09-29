@@ -11,9 +11,11 @@ import {
   importCustomProviderModelsRequestSchema,
   updateCustomProviderModelRequestSchema,
   type CustomModelRecord,
+  type ModelCatalogMatch,
 } from "@open-inspect/shared/types/custom-providers";
 import { Hono } from "hono";
 import { CustomProviderStore } from "../db/custom-providers";
+import { ModelCatalogCache } from "../db/model-catalog";
 import { createLogger } from "../logger";
 import { admit, dispatch } from "../routing/admit";
 import type { ControlPlaneHonoEnv } from "../routing/hono-env";
@@ -190,7 +192,22 @@ async function syncProviderModels(
   if (models.length === 0) {
     return error(`No models found at ${url} (expected a data[] list)`, 502);
   }
-  return json({ models });
+  // Models already imported keep their admin-edited metadata, so the sync
+  // result only offers the ones an import would actually add.
+  const imported = new Set((await providers.listModels(provider.id)).map((model) => model.modelId));
+  const visible = models.filter((model) => !imported.has(model.modelId));
+  // Public-catalog metadata only prefills import defaults; a cache or fetch
+  // failure must never fail the sync.
+  const catalog = ctx.db ? new ModelCatalogCache(ctx.db) : null;
+  const matches = catalog
+    ? await catalog.matchAll(visible.map((model) => model.modelId)).catch(() => new Map())
+    : new Map<string, ModelCatalogMatch>();
+  return json({
+    models: visible.map((model) => {
+      const match = matches.get(model.modelId);
+      return match ? { ...model, catalog: match } : model;
+    }),
+  });
 }
 
 async function listProviderModels(

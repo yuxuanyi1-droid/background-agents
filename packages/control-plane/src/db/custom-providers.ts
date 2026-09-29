@@ -238,17 +238,24 @@ export class CustomProviderStore {
     return result.meta.changes > 0;
   }
 
+  /**
+   * Insert models imported from a gateway's synced list. Add-only: rows that
+   * already exist keep their possibly admin-edited metadata, so a re-sync
+   * followed by an import never resets earlier edits. Remove models with
+   * deleteModel.
+   */
   async importModels(providerId: string, models: ImportedCustomModel[]): Promise<void> {
+    if (models.length === 0) return;
     const now = Date.now();
-    const statements = [
-      this.db.prepare(`DELETE FROM custom_provider_models WHERE provider_id = ?`).bind(providerId),
-      ...models.map((model) =>
+    await this.db.batch(
+      models.map((model) =>
         this.db
           .prepare(
             `INSERT INTO custom_provider_models (
                provider_id, model_id, display_name, modalities, reasoning_efforts,
                context_window_tokens, max_output_tokens, enabled, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+             ON CONFLICT (provider_id, model_id) DO NOTHING`
           )
           .bind(
             providerId,
@@ -261,9 +268,8 @@ export class CustomProviderStore {
             now,
             now
           )
-      ),
-    ];
-    await this.db.batch(statements);
+      )
+    );
   }
 
   async updateModel(

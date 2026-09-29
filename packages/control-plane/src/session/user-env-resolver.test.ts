@@ -115,6 +115,8 @@ class FakeSqlDatabase implements SqlDatabase {
   globalSecretRows: D1Row[] = [];
   readonly repoSecretRowsByRepoId = new Map<number, D1Row[]>();
   readonly environmentSecretRowsById = new Map<string, D1Row[]>();
+  /** Custom-provider registry rows; empty models no configured providers. */
+  customProviderRows: D1Row[] = [];
 
   prepare(query: string): SqlStatement {
     return new FakeStatement(this, query.replace(/\s+/g, " ").trim());
@@ -138,6 +140,9 @@ class FakeSqlDatabase implements SqlDatabase {
     }
     if (query === "SELECT key, encrypted_value FROM environment_secrets WHERE environment_id = ?") {
       return this.environmentSecretRowsById.get(bound[0] as string) ?? [];
+    }
+    if (query === "SELECT * FROM custom_providers ORDER BY created_at ASC, id ASC") {
+      return this.customProviderRows;
     }
     throw new Error(`Unexpected D1 query: ${query}`);
   }
@@ -275,6 +280,7 @@ function makeHarness(
     },
     durableObjectId: "do-id-fallback",
     repoSecretsEncryptionKey: options.encryptionKey ?? ENCRYPTION_KEY,
+    providerAccountsEncryptionKey: options.encryptionKey ?? ENCRYPTION_KEY,
     secretsCapEnforcement: options.capEnforcement,
     log,
   });

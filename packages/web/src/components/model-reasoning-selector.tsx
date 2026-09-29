@@ -64,7 +64,15 @@ export function ModelReasoningSelector({
   const reasoningConfig = getReasoningConfig(selectedModel);
   const selectedEffort = reasoningEffort ?? reasoningConfig?.default;
   const effortLabel = selectedEffort ? formatEffort(selectedEffort) : "Default";
-  const modelLabel = formatModelNameLower(selectedModel);
+  // Custom-provider models carry their display name in the options list, not
+  // the static catalog; an option that vanished from the list falls back to
+  // the raw ID.
+  const selectedOption = items
+    .flatMap((group) => group.models)
+    .find(({ id }) => id === selectedModel);
+  const modelLabel = selectedOption
+    ? selectedOption.name.toLowerCase()
+    : formatModelNameLower(selectedModel);
   const harnessLabel = harness ? getHarnessLabel(harness) : null;
   const canChangeHarness = harness !== undefined && onHarnessChange !== undefined;
   const triggerLabel = [
