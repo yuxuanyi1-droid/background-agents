@@ -9,6 +9,7 @@ import {
   type CustomProviderHeader,
   type CustomProviderProtocol,
   type CustomProviderRecord,
+  type SyncedCustomProviderModel,
 } from "@open-inspect/shared/types/custom-providers";
 import { browserApiFetch } from "@/lib/browser-api-fetch";
 import { Button } from "@/components/ui/button";
@@ -37,6 +38,22 @@ interface ImportedModelDraft {
   reasoningEfforts: string[];
   contextWindowTokens: number;
   maxOutputTokens: number;
+}
+
+/** Import defaults for one synced model; catalog metadata fills what it has. */
+function draftForModel(model: SyncedCustomProviderModel): ImportedModelDraft {
+  const catalog = model.catalog;
+  const modalities = catalog
+    ? [...new Set([...catalog.inputModalities, ...catalog.outputModalities])]
+    : [];
+  return {
+    modelId: model.modelId,
+    displayName: model.displayName,
+    modalities: modalities.length > 0 ? modalities : ["text"],
+    reasoningEfforts: [],
+    contextWindowTokens: catalog?.contextWindowTokens ?? 128_000,
+    maxOutputTokens: catalog?.maxOutputTokens ?? 8_192,
+  };
 }
 
 async function api<T>(path: `/api/${string}`, init?: RequestInit): Promise<T> {
@@ -297,7 +314,7 @@ function ImportDialog({
   onImported: () => void;
 }) {
   const [syncing, setSyncing] = useState(false);
-  const [synced, setSynced] = useState<{ modelId: string; displayName: string }[]>([]);
+  const [synced, setSynced] = useState<SyncedCustomProviderModel[]>([]);
   const [selected, setSelected] = useState<Record<string, ImportedModelDraft>>({});
   const [importing, setImporting] = useState(false);
 
@@ -305,25 +322,16 @@ function ImportDialog({
     if (!provider) return;
     setSyncing(true);
     try {
-      const body = await api<{ models: { modelId: string; displayName: string }[] }>(
+      const body = await api<{ models: SyncedCustomProviderModel[] }>(
         `/api/custom-providers/${provider.id}/sync-models`,
         { method: "POST" }
       );
       setSynced(body.models);
+      if (body.models.length === 0) {
+        toast("All models on this gateway are already imported.");
+      }
       setSelected(
-        Object.fromEntries(
-          body.models.map((model) => [
-            model.modelId,
-            {
-              modelId: model.modelId,
-              displayName: model.displayName,
-              modalities: ["text"],
-              reasoningEfforts: [],
-              contextWindowTokens: 128_000,
-              maxOutputTokens: 8_192,
-            },
-          ])
-        )
+        Object.fromEntries(body.models.map((model) => [model.modelId, draftForModel(model)]))
       );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Model sync failed");
@@ -362,7 +370,8 @@ function ImportDialog({
           <DialogTitle>Import models — {provider?.name}</DialogTitle>
           <DialogDescription>
             Sync the gateway&apos;s model list, pick the models to import, and adjust each
-            model&apos;s metadata. Importing replaces this provider&apos;s imported set.
+            model&apos;s metadata. Already-imported models are hidden from the list; importing adds
+            new models and leaves existing ones and their edits untouched.
           </DialogDescription>
         </div>
         <div className="flex items-center gap-2">
@@ -389,21 +398,18 @@ function ImportDialog({
                         setSelected((current) => {
                           const next = { ...current };
                           if (active) delete next[model.modelId];
-                          else
-                            next[model.modelId] = {
-                              modelId: model.modelId,
-                              displayName: model.displayName,
-                              modalities: ["text"],
-                              reasoningEfforts: [],
-                              contextWindowTokens: 128_000,
-                              maxOutputTokens: 8_192,
-                            };
+                          else next[model.modelId] = draftForModel(model);
                           return next;
                         })
                       }
                       aria-label={`Import ${model.modelId}`}
                     />
                     {model.modelId}
+                    {model.catalog && (
+                      <span className="text-xs font-normal text-muted-foreground">
+                        metadata from OpenRouter
+                      </span>
+                    )}
                   </label>
                   {active && draft && (
                     <div className="grid gap-3 sm:grid-cols-2">

@@ -128,10 +128,21 @@ export const customProviderResponseSchema = z.strictObject({
   provider: customProviderRecordSchema,
 });
 
+/** Metadata matched from a public catalog (e.g. OpenRouter) for one synced model. */
+export const modelCatalogMatchSchema = z.strictObject({
+  contextWindowTokens: z.number().int().positive(),
+  maxOutputTokens: z.number().int().positive().nullable(),
+  inputModalities: z.array(customModelModalitySchema),
+  outputModalities: z.array(customModelModalitySchema),
+});
+export type ModelCatalogMatch = z.infer<typeof modelCatalogMatchSchema>;
+
 /** One entry of a gateway's synced model list; not persisted until imported. */
 export const syncedCustomProviderModelSchema = z.strictObject({
   modelId: z.string().min(1).max(200),
   displayName: z.string().min(1).max(200),
+  /** Present when the model matched a public catalog entry. */
+  catalog: modelCatalogMatchSchema.optional(),
 });
 export type SyncedCustomProviderModel = z.infer<typeof syncedCustomProviderModelSchema>;
 
