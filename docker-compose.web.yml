@@ -1,0 +1,33 @@
+# The web app in the compose stack, as an overlay so the base stack (and the
+# CI smoke that runs it) stays control-plane-only, as on AWS where the web app
+# stays on Vercel:
+#   docker compose -f docker-compose.yml -f docker-compose.web.yml up -d
+#
+# Only the web service is defined here; it attaches to the stack's default
+# network and reaches the control plane as http://app:8787, so server-side
+# calls never leave the compose network. The browser's WebSocket URL is
+# different: NEXT_PUBLIC_* variables are inlined into the client bundle at
+# build time, so it is a build argument read from .env (WEB_PUBLIC_WS_URL) and
+# changing it means rebuilding:
+#   docker compose -f docker-compose.yml -f docker-compose.web.yml build web
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: packages/web/Dockerfile
+      args:
+        NEXT_PUBLIC_WS_URL: ${WEB_PUBLIC_WS_URL:?WEB_PUBLIC_WS_URL must name the public WebSocket URL the browser dials; wss://<control-plane domain> once TLS is up}
+    image: open-inspect-web:local
+    environment:
+      CONTROL_PLANE_URL: ${WEB_CONTROL_PLANE_URL:-http://app:8787}
+      # The web app signs its server-to-server requests with the control
+      # plane's SERVICE_AUTH_SECRET_WEB; the base .env carries it.
+      SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET_WEB:?SERVICE_AUTH_SECRET_WEB must be set; the control plane verifies the same value}
+    # Loopback like the app's port; Caddy or a firewall fronts it publicly.
+    ports:
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-3000}:3000"
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
