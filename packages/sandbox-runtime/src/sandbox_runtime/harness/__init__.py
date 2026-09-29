@@ -77,7 +77,9 @@ def build_agent_harness(
                 # From the bridge's own SESSION_CONFIG: MCP entries can carry
                 # credentials, and the handoff file never does.
                 mcp_servers=_mcp_servers_from(session_config),
-                default_model=str(session_config.get("model") or "claude-sonnet-4-6"),
+                # A custom-provider session keeps its provider prefix so the
+                # harness can route the gateway credential at open.
+                default_model=_default_model_from(session_config),
                 oauth_managed=oauth_managed,
                 system_prompt_append=_repository_guidance(handoff.workdir),
                 tools=ToolServerConfig(
@@ -131,6 +133,15 @@ def _session_config_from_env() -> dict[str, object]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _default_model_from(session_config: dict[str, object]) -> str:
+    """The session's default model, keeping a custom provider's key prefix."""
+    provider = str(session_config.get("provider") or "anthropic")
+    model = str(session_config.get("model") or "claude-sonnet-4-6")
+    if provider.startswith("cp") and "/" not in model:
+        return f"{provider}/{model}"
+    return model
 
 
 def _mcp_servers_from(session_config: dict[str, object]) -> tuple[dict[str, object], ...]:

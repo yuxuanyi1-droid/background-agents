@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { Logger } from "../../../logger";
 import type { RepositoryRef } from "@open-inspect/shared/types/repositories";
 import { getValidHarnessOrDefault, harnessIdSchema } from "@open-inspect/shared/harnesses";
-import { getValidModelOrDefault, isValidModel } from "@open-inspect/shared/models";
+import { getValidModelOrDefault, isSelectableModelId } from "@open-inspect/shared/models";
 import type { SpawnSource } from "@open-inspect/shared/types/sessions";
 import { normalizeSandboxSettings } from "../../../sandbox/settings";
 import { DEFAULT_BASE_BRANCH } from "../../../repos/default-branch";
@@ -152,7 +152,7 @@ export class SessionInitHandler {
     }
 
     const model = getValidModelOrDefault(body.model);
-    if (body.model && !isValidModel(body.model)) {
+    if (body.model && !isSelectableModelId(body.model)) {
       log.warn("Invalid model name, using default", {
         requested_model: body.model,
         default_model: model,

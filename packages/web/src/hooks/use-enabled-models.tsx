@@ -8,25 +8,26 @@ import {
   DEFAULT_ENABLED_MODELS,
   applyModelPreferenceChanges,
   isValidModel,
-  normalizeModelId,
   normalizeValidModels,
   type ModelCategory,
   type ModelPreferenceChange,
-  type ValidModel,
 } from "@open-inspect/shared/models";
+import { customModelRecordSchema } from "@open-inspect/shared/types/custom-providers";
 import { browserApiFetch } from "@/lib/browser-api-fetch";
 
 export const MODEL_PREFERENCES_KEY = "/api/model-preferences";
+export const CUSTOM_MODELS_KEY = "/api/custom-models";
 const INITIAL_MODEL_PREFERENCES_REVISION = 0;
 
-const canonicalModelSchema = z.custom<ValidModel>(
-  (value) => typeof value === "string" && isValidModel(value) && normalizeModelId(value) === value
-);
+const canonicalModelSchema = z.string().min(1);
 const modelPreferencesSchema = z.object({
   enabledModels: z.array(canonicalModelSchema).nonempty(),
   revision: z.number().int().nonnegative(),
 });
 type ModelPreferencesResponse = z.infer<typeof modelPreferencesSchema>;
+
+const customModelsSchema = z.object({ models: z.array(customModelRecordSchema) });
+type CustomModelsResponse = z.infer<typeof customModelsSchema>;
 
 function responseError(body: unknown): string | null {
   if (typeof body !== "object" || body === null || !("error" in body)) return null;
@@ -36,6 +37,8 @@ function responseError(body: unknown): string | null {
 export function useEnabledModels(): {
   enabledModels: string[];
   enabledModelOptions: ModelCategory[];
+  /** Enabled custom-provider models, grouped per provider for the picker. */
+  customModelOptions: ModelCategory[];
   loading: boolean;
   error: unknown;
   saving: boolean;
@@ -43,21 +46,48 @@ export function useEnabledModels(): {
 } {
   const { data, error, isLoading, mutate } =
     useSWR<ModelPreferencesResponse>(MODEL_PREFERENCES_KEY);
+  // Custom models are deployment data, not user preferences: fetch alongside
+  // so every picker sees them without separate wiring.
+  const { data: customData } = useSWR<CustomModelsResponse>(CUSTOM_MODELS_KEY);
   const [activeWrites, setActiveWrites] = useState(0);
 
-  const enabledModels = useMemo<ValidModel[]>(() => {
+  const customModels = useMemo(() => {
+    const parsed = customModelsSchema.safeParse(customData ?? { models: [] });
+    return parsed.success ? parsed.data.models.filter((model) => model.enabled) : [];
+  }, [customData]);
+
+  const customModelOptions = useMemo<ModelCategory[]>(() => {
+    const groups = new Map<string, ModelCategory>();
+    for (const model of customModels) {
+      const category = `${model.providerName} (custom)`;
+      const group = groups.get(category) ?? { category, models: [] };
+      group.models.push({
+        id: model.id,
+        name: model.displayName,
+        description: `${model.providerName} · ${model.protocol === "anthropic" ? "Anthropic" : "OpenAI-compatible"} protocol`,
+      });
+      groups.set(category, group);
+    }
+    return [...groups.values()];
+  }, [customModels]);
+
+  const enabledModels = useMemo<string[]>(() => {
     if (isLoading) return [];
     const normalized = normalizeValidModels(data?.enabledModels ?? []);
-    return normalized.length > 0 ? normalized : DEFAULT_ENABLED_MODELS;
-  }, [data, isLoading]);
+    const statics = normalized.length > 0 ? normalized : DEFAULT_ENABLED_MODELS;
+    return [...statics, ...customModels.map((model) => model.id)];
+  }, [data, isLoading, customModels]);
 
   const enabledModelOptions = useMemo(() => {
     const enabledSet = new Set(enabledModels);
-    return MODEL_OPTIONS.map((group) => ({
-      ...group,
-      models: group.models.filter((model) => enabledSet.has(model.id)),
-    })).filter((group) => group.models.length > 0);
-  }, [enabledModels]);
+    return [
+      ...MODEL_OPTIONS.map((group) => ({
+        ...group,
+        models: group.models.filter((model) => enabledSet.has(model.id)),
+      })).filter((group) => group.models.length > 0),
+      ...customModelOptions,
+    ];
+  }, [enabledModels, customModelOptions]);
 
   const updateModels = useCallback(
     async (changes: readonly ModelPreferenceChange[]): Promise<void> => {
@@ -65,7 +95,10 @@ export function useEnabledModels(): {
         throw new Error("Model preferences must load before saving");
       }
 
-      const next = applyModelPreferenceChanges(enabledModels, changes);
+      const next = applyModelPreferenceChanges(
+        enabledModels.filter((model) => isValidModel(model)),
+        changes
+      );
       if (next.length === 0) throw new Error("At least one model must be enabled");
 
       setActiveWrites((current) => current + 1);
@@ -107,6 +140,7 @@ export function useEnabledModels(): {
   return {
     enabledModels,
     enabledModelOptions,
+    customModelOptions,
     loading: isLoading,
     error,
     saving: activeWrites > 0,

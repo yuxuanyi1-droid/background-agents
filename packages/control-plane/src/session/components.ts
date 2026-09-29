@@ -333,6 +333,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     resolveRepoId,
     durableObjectId,
     repoSecretsEncryptionKey,
+    providerAccountsEncryptionKey: env.PROVIDER_ACCOUNTS_ENCRYPTION_KEY,
     secretsCapEnforcement: env.SECRETS_CAP_ENFORCEMENT,
     log,
   });

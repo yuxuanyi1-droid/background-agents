@@ -1,7 +1,7 @@
 "use client";
 
 import { toast } from "sonner";
-import { MODEL_OPTIONS, type ValidModel } from "@open-inspect/shared/models";
+import { MODEL_OPTIONS } from "@open-inspect/shared/models";
 import { useEnabledModels } from "@/hooks/use-enabled-models";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -16,7 +16,7 @@ export function ModelsSettings() {
   } = useEnabledModels();
   const enabledModels = new Set(storedEnabledModels);
 
-  const toggleModel = (modelId: ValidModel) => {
+  const toggleModel = (modelId: string) => {
     const enabled = !enabledModels.has(modelId);
     if (!enabled && enabledModels.size <= 1) return;
     void savePreferences([{ modelId, enabled }]);

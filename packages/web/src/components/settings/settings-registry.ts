@@ -114,6 +114,19 @@ export const SETTINGS_GROUPS = [
         ),
       },
       {
+        id: "custom-providers",
+        label: "Custom Providers",
+        description: "Register gateway endpoints and import their models",
+        keywords: "gateway openai compatible anthropic base url custom models",
+        icon: KeyIcon,
+        visibility: anyOf("custom_providers.read"),
+        panel: lazyPanel(() =>
+          import("./custom-providers-settings").then(
+            ({ CustomProvidersSettings }) => CustomProvidersSettings
+          )
+        ),
+      },
+      {
         id: "skills",
         label: "Skills",
         description: "Manage shared skills and profiles",

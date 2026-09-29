@@ -24,7 +24,7 @@ import {
   type SlackMentionsPolicy,
   type SlackRoutingRule,
 } from "@open-inspect/shared/types/integrations";
-import { isValidModel, isValidReasoningEffort } from "@open-inspect/shared/models";
+import { isSelectableModelId, isValidReasoningEffort } from "@open-inspect/shared/models";
 import { normalizeSandboxSettings } from "../sandbox/settings";
 import type { SqlDatabase } from "./sql-database";
 
@@ -419,7 +419,7 @@ export class IntegrationSettingsStore {
   }
 
   private validateModelAndEffort(settings: { model?: string; reasoningEffort?: string }): void {
-    if (settings.model !== undefined && !isValidModel(settings.model)) {
+    if (settings.model !== undefined && !isSelectableModelId(settings.model)) {
       throw new IntegrationSettingsValidationError(`Invalid model ID: ${settings.model}`);
     }
 

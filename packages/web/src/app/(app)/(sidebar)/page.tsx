@@ -21,7 +21,6 @@ import {
   getSubscriptionProviderForModel,
   type ModelCategory,
   type ReasoningEffort,
-  type ValidModel,
 } from "@open-inspect/shared/models";
 import type { ModelPreference } from "@/lib/model-selection";
 import {
@@ -259,7 +258,7 @@ export default function Home() {
   }, []);
 
   const handleModelChange = useCallback(
-    (model: ValidModel) => {
+    (model: string) => {
       saveModelPreferenceDraft({ model, reasoningEffort: getDefaultReasoningEffort(model) });
     },
     [saveModelPreferenceDraft]
@@ -460,8 +459,8 @@ function HomeContent({
   isAuthenticated: boolean;
   canCreateSession: boolean;
   picker: SessionTargetSelection;
-  selectedModel: ValidModel;
-  setSelectedModel: (value: ValidModel) => void;
+  selectedModel: string;
+  setSelectedModel: (value: string) => void;
   reasoningEffort: ReasoningEffort | undefined;
   setReasoningEffort: (value: ReasoningEffort | undefined) => void;
   harness: HarnessId;

@@ -2,12 +2,11 @@ import {
   getDefaultReasoningEffort,
   getReasoningConfig,
   getValidModelOrDefault,
-  isValidModel,
+  isSelectableModelId,
   isValidReasoningEffort,
   normalizeModelId,
   resolveEnabledModel,
   type ReasoningEffort,
-  type ValidModel,
 } from "@open-inspect/shared/models";
 import { escapeMrkdwnText } from "@open-inspect/shared/slack";
 import { z } from "zod";
@@ -19,8 +18,11 @@ export interface InlinePromptOptions {
 
 export const EMPTY_INLINE_PROMPT_OPTIONS: InlinePromptOptions = {};
 
-const validModelSchema = z.custom<ValidModel>(
-  (value) => typeof value === "string" && isValidModel(value) && normalizeModelId(value) === value
+const validModelSchema = z.custom<string>(
+  (value) =>
+    typeof value === "string" &&
+    isSelectableModelId(value) &&
+    (value.includes("/") || normalizeModelId(value) === value)
 );
 const reasoningEffortSchema = z.enum(["none", "low", "medium", "high", "xhigh", "max"]);
 const modelSelectionSchema = z.object({
@@ -143,7 +145,8 @@ export function hasInlinePromptOptions(options: InlinePromptOptions): boolean {
 
 /** A model paired with the reasoning effort it runs at. */
 export interface ModelSelection {
-  model: ValidModel;
+  /** Catalog id or custom-provider id; stored selections are plain strings. */
+  model: string;
   reasoningEffort?: ReasoningEffort;
 }
 
@@ -172,16 +175,16 @@ export function sameModelSelection(a: ModelSelection, b: ModelSelection): boolea
 export function resolveInlinePromptOptions(
   options: InlinePromptOptions,
   defaults: { model: string; reasoningEffort?: string },
-  enabledModels: readonly ValidModel[]
+  enabledModels: readonly string[]
 ): ResolveInlinePromptOptionsResult {
   const { model: sessionModel, reasoningEffort: sessionReasoningEffort } =
     normalizeModelSelection(defaults);
-  let modelOverride: ValidModel | undefined;
+  let modelOverride: string | undefined;
   if (options.model) {
-    if (!isValidModel(options.model)) {
+    if (!isSelectableModelId(options.model)) {
       return { ok: false, error: `Unknown model "${escapeMrkdwnText(options.model)}".` };
     }
-    modelOverride = normalizeModelId(options.model) as ValidModel;
+    modelOverride = normalizeModelId(options.model);
     if (!enabledModels.includes(modelOverride)) {
       return { ok: false, error: `Model "${modelOverride}" is not enabled.` };
     }

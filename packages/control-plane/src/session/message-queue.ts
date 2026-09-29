@@ -16,7 +16,7 @@ import {
   DEFAULT_MODEL,
   getDefaultReasoningEffort,
   getValidModelOrDefault,
-  isValidModel,
+  isSelectableModelId,
 } from "@open-inspect/shared/models";
 import type { SandboxEvent } from "@open-inspect/shared/types/sandbox-events";
 import { isSessionPromptable } from "@open-inspect/shared/types/session-activity";
@@ -803,7 +803,7 @@ export class SessionMessageQueue {
 
     let messageModel: string | null = null;
     if (data.model) {
-      if (isValidModel(data.model)) {
+      if (isSelectableModelId(data.model)) {
         // An override the session's harness cannot run is a user-visible
         // rejection, never a silent fallback to a model it can run.
         const harness = getValidHarnessOrDefault(this.repository.getSession()?.harness);

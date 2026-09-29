@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 function createSaveMock(initial: string[]) {
-  let saved = normalizeValidModels(initial);
+  let saved: string[] = normalizeValidModels(initial);
   let revision = 1;
   return vi.fn(async (_url: unknown, init: RequestInit) => {
     const body = JSON.parse(init.body as string) as {

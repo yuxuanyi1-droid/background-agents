@@ -4,7 +4,7 @@ import {
   harnessSupportsModel,
   type HarnessId,
 } from "@open-inspect/shared/harnesses";
-import type { ModelCategory, ReasoningEffort, ValidModel } from "@open-inspect/shared/models";
+import type { ModelCategory, ReasoningEffort } from "@open-inspect/shared/models";
 import { resolveModelPreference, type ModelPreference } from "@/lib/model-selection";
 
 /** Model picker groups reduced to the models the harness can run. */
@@ -30,7 +30,7 @@ export interface HarnessModelSelection {
   availability: HarnessModelAvailability;
   /** Picker groups holding only the enabled models the harness can run. */
   options: ModelCategory[];
-  model: ValidModel;
+  model: string;
   reasoningEffort?: ReasoningEffort;
 }
 

@@ -14,7 +14,7 @@ import { isSessionPromptable } from "@open-inspect/shared/types/session-activity
 import type { SessionStatus } from "@open-inspect/shared/types/sessions";
 import { MAX_WEB_PROMPT_CHARS } from "@open-inspect/shared/types/websocket";
 import type { PromptSkillSuggestionSource } from "@/lib/prompt-skill-completion";
-import type { ModelCategory, ReasoningEffort, ValidModel } from "@open-inspect/shared/models";
+import type { ModelCategory, ReasoningEffort } from "@open-inspect/shared/models";
 import type { SessionCapabilities } from "@/lib/session-capabilities";
 import type { HarnessId } from "@open-inspect/shared/harnesses";
 
@@ -52,10 +52,10 @@ type SessionPromptComposerProps = {
     onRemove: (id: string) => void;
   };
   model: {
-    selectedModel: ValidModel;
+    selectedModel: string;
     reasoningEffort: ReasoningEffort | undefined;
     items: ModelCategory[];
-    onModelChange: (model: ValidModel) => void;
+    onModelChange: (model: string) => void;
     onReasoningEffortChange: (value: ReasoningEffort | undefined) => void;
   };
 };
