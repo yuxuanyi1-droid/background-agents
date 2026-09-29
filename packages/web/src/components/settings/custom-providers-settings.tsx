@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
   CUSTOM_MODEL_MODALITIES,
@@ -538,9 +538,9 @@ export function CustomProvidersSettings() {
     }
   }, []);
 
-  if (providers === null && error === null) {
+  useEffect(() => {
     void load();
-  }
+  }, [load]);
 
   const remove = async (provider: CustomProviderRecord) => {
     if (!window.confirm(`Delete provider "${provider.name}" and its imported models?`)) return;
