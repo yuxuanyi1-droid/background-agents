@@ -482,12 +482,22 @@ export function applyModelPreferenceChanges(
   return [...next];
 }
 
-/** Resolve a desired model against the enabled catalog using a canonical fallback policy. */
+/**
+ * Resolve a desired model against the enabled catalog using a canonical fallback policy.
+ *
+ * A well-formed custom-provider model ID passes through unchanged: it is not
+ * part of the static catalog, and its dynamic validity (the provider still
+ * exists and the model is enabled) is checked at prompt time against the
+ * custom-provider registry.
+ */
 export function resolveEnabledModel(options: {
   model?: string | null;
   enabledModels?: readonly string[];
   fallbackModel?: string | null;
 }): string {
+  if (options.model && isCustomModelId(options.model)) {
+    return options.model;
+  }
   const fallback = getValidModelOrDefault(options.fallbackModel);
   const desired =
     options.model && isValidModel(options.model)
@@ -557,9 +567,12 @@ export function extractProviderAndModel(modelId: string): { provider: string; mo
 /**
  * Resolve the subscription billing provider for a canonical catalog model.
  * Unlike general model compatibility helpers, this rejects legacy bare IDs,
- * malformed routes, and models absent from the current catalog.
+ * malformed routes, and models absent from the current catalog. A
+ * custom-provider model routes through a gateway rather than a subscription
+ * provider and resolves to null.
  */
 export function getSubscriptionProviderForModel(modelId: string): SubscriptionProviderId | null {
+  if (isCustomModelId(modelId)) return null;
   if (!VALID_MODELS.includes(modelId as ValidModel)) {
     throw new Error(`Invalid canonical model ID: ${modelId}`);
   }

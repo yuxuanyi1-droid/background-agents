@@ -252,6 +252,27 @@ describe("model utilities", () => {
     ).toBe("openai/gpt-5.4");
   });
 
+  it("passes custom-provider model IDs through regardless of the enabled set", () => {
+    const customModel = "cpa-1a2b3c4d/gateway-model";
+    expect(
+      resolveEnabledModel({
+        model: customModel,
+        fallbackModel: "anthropic/claude-sonnet-4-6",
+        enabledModels: ["anthropic/claude-sonnet-4-6"],
+      })
+    ).toBe(customModel);
+    expect(
+      resolveEnabledModel({ model: customModel, fallbackModel: "anthropic/claude-sonnet-4-6" })
+    ).toBe(customModel);
+    expect(
+      resolveEnabledModel({
+        model: "cpo-1a2b3c4d/openai-gateway-model",
+        fallbackModel: "anthropic/claude-sonnet-4-6",
+        enabledModels: [],
+      })
+    ).toBe("cpo-1a2b3c4d/openai-gateway-model");
+  });
+
   it("rejects invalid, legacy, empty, and case-mismatched models", () => {
     for (const model of [
       "gpt-4",
@@ -306,6 +327,8 @@ describe("model utilities", () => {
     expect(getSubscriptionProviderForModel("xai/grok-4.6")).toBe("xai");
     expect(getSubscriptionProviderForModel("anthropic/claude-sonnet-4-6")).toBe("anthropic");
     expect(getSubscriptionProviderForModel("deepseek/deepseek-v4-pro")).toBeNull();
+    expect(getSubscriptionProviderForModel("cpa-1a2b3c4d/gateway-model")).toBeNull();
+    expect(getSubscriptionProviderForModel("cpo-1a2b3c4d/openai-gateway-model")).toBeNull();
   });
 
   it("rejects bare, malformed, and unknown billing model routes", () => {
