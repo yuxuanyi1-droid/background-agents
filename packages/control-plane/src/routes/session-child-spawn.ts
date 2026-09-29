@@ -18,6 +18,7 @@ import {
   type ValidModel,
   VALID_MODELS,
 } from "@open-inspect/shared/models";
+import { customModelReasoningEfforts } from "./custom-model-efforts";
 import { isCustomModelId } from "@open-inspect/shared/types/custom-providers";
 import { generateId } from "../auth/crypto";
 import { getEffectiveEnabledModels } from "../db/model-preferences";
@@ -192,8 +193,16 @@ export async function handleSpawnChild(
   if (harnessIncompatibility) {
     return error(harnessIncompatibility.message, 400);
   }
-  if (body.reasoningEffort !== undefined && !isValidReasoningEffort(model, body.reasoningEffort)) {
-    const validEfforts = getReasoningConfig(model)?.efforts;
+  const childCustomEfforts = await customModelReasoningEfforts(
+    ctx.db,
+    env.PROVIDER_ACCOUNTS_ENCRYPTION_KEY,
+    model
+  );
+  if (
+    body.reasoningEffort !== undefined &&
+    !isValidReasoningEffort(model, body.reasoningEffort, childCustomEfforts)
+  ) {
+    const validEfforts = getReasoningConfig(model)?.efforts ?? childCustomEfforts;
     const suffix = validEfforts?.length
       ? ` Valid efforts: ${validEfforts.join(", ")}`
       : " This model does not support reasoning effort overrides.";
@@ -204,7 +213,8 @@ export async function handleSpawnChild(
   }
   const requestedReasoningEffort = body.reasoningEffort ?? spawnContext.reasoningEffort;
   const reasoningEffort =
-    requestedReasoningEffort && isValidReasoningEffort(model, requestedReasoningEffort)
+    requestedReasoningEffort &&
+    isValidReasoningEffort(model, requestedReasoningEffort, childCustomEfforts)
       ? requestedReasoningEffort
       : null;
 

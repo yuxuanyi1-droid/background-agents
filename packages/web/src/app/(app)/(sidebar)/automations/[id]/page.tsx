@@ -5,7 +5,6 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { MAX_AUTOMATION_INVOCATION_LIST_LIMIT } from "@open-inspect/shared/types/automations";
 import { describeCron } from "@open-inspect/shared/cron";
-import { getReasoningConfig } from "@open-inspect/shared/models";
 import { CollapsedSidebarControls, useSidebarContext } from "@/components/sidebar-layout";
 import { useAutomation, useAutomationInvocations } from "@/hooks/use-automations";
 import { useEnvironments } from "@/hooks/use-environments";
@@ -16,6 +15,8 @@ import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/ui/error-banner";
 import { BackIcon, PencilIcon } from "@/components/ui/icons";
 import { formatModelNameLower } from "@/lib/format";
+import { defaultReasoningEffort } from "@/lib/model-selection";
+import { useEnabledModels } from "@/hooks/use-enabled-models";
 import { getHarnessLabel } from "@open-inspect/shared/harnesses";
 import { formatAutomationTargetsLabel } from "@/lib/repo-label";
 import { browserApiFetch } from "@/lib/browser-api-fetch";
@@ -49,9 +50,12 @@ export default function AutomationDetailPage({ params }: { params: Promise<{ id:
   } = useAutomationInvocations(id, historyLimit, 0);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const { enabledModelOptions } = useEnabledModels();
   const reasoningLabel = automation
     ? (automation.reasoningEffort ??
-      (getReasoningConfig(automation.model) ? "Model default" : "Not supported"))
+      (defaultReasoningEffort(automation.model, enabledModelOptions) !== undefined
+        ? "Model default"
+        : "Not supported"))
     : null;
 
   const handleAction = async (action: "pause" | "resume" | "trigger") => {

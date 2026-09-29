@@ -82,6 +82,7 @@ import {
   validateSlackTriggerConfig,
   validateTargetCounts,
 } from "./automation-validation";
+import { customModelReasoningEfforts } from "./custom-model-efforts";
 
 const logger = createLogger("router:automations");
 
@@ -213,7 +214,11 @@ async function handleCreateAutomation(
   const model = getValidModelOrDefault(body.model);
   const harnessIncompatibility = checkHarnessCompatibility(harness, model);
   if (harnessIncompatibility) return error(harnessIncompatibility.message, 400);
-  const reasoningEffort = resolveReasoningEffort(model, body.reasoningEffort);
+  const reasoningEffort = resolveReasoningEffort(
+    model,
+    body.reasoningEffort,
+    await customModelReasoningEfforts(ctx.db, env.PROVIDER_ACCOUNTS_ENCRYPTION_KEY, model)
+  );
   if (body.reasoningEffort !== undefined && body.reasoningEffort !== null && !reasoningEffort) {
     return error("Invalid reasoning effort for selected model", 400);
   }
@@ -478,11 +483,16 @@ async function handleUpdateAutomation(
   );
   if (harnessIncompatibility) return error(harnessIncompatibility.message, 400);
   const requestedReasoningEffort = body.reasoningEffort;
+  const nextCustomEfforts = await customModelReasoningEfforts(
+    ctx.db,
+    env.PROVIDER_ACCOUNTS_ENCRYPTION_KEY,
+    nextModel
+  );
   const resolvedReasoningEffort =
     requestedReasoningEffort !== undefined
-      ? resolveReasoningEffort(nextModel, requestedReasoningEffort)
+      ? resolveReasoningEffort(nextModel, requestedReasoningEffort, nextCustomEfforts)
       : body.model !== undefined && existing.reasoning_effort !== null
-        ? resolveReasoningEffort(nextModel, existing.reasoning_effort)
+        ? resolveReasoningEffort(nextModel, existing.reasoning_effort, nextCustomEfforts)
         : existing.reasoning_effort;
 
   if (

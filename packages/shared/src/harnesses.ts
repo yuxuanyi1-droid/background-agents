@@ -14,7 +14,7 @@
 
 import { z } from "zod";
 import { extractProviderAndModel } from "./models";
-import { isCustomProviderKey } from "./types/custom-providers";
+import { isCustomProviderKey, type CustomProviderProtocol } from "./types/custom-providers";
 import type {
   ModelProviderSelections,
   ProviderAuthMode,
@@ -47,6 +47,13 @@ export interface HarnessCapabilities {
   readonly modelFamilies: "any" | readonly string[];
   /** Provider id → auth modes the harness can *select* for that provider. */
   readonly providerAuth: Readonly<Partial<Record<string, readonly ProviderAuthMode[]>>>;
+  /**
+   * Custom-provider wire protocols the harness can run. Undefined means every
+   * protocol: the family check alone decides. The model ID does not carry the
+   * protocol (both OpenAI wire protocols share the `cpo-` prefix), so callers
+   * holding registry metadata pass it alongside the ID.
+   */
+  readonly customProviderProtocols?: readonly CustomProviderProtocol[];
   /** How a sandbox restore resumes the conversation. */
   readonly resume: "session_id";
 }
@@ -76,6 +83,9 @@ export const HARNESS_CATALOG = {
     providerAuth: {
       openai: ["api_key"],
     },
+    // Codex runs the OpenAI Responses wire API only on custom gateways; the
+    // chat-completions protocol routes to the pi and dsh harnesses instead.
+    customProviderProtocols: ["openai_responses"],
     resume: "session_id",
   },
   pi: {
@@ -92,7 +102,7 @@ export const HARNESS_CATALOG = {
   },
   dsh: {
     label: "DeepSeek Harness",
-    modelFamilies: ["deepseek"],
+    modelFamilies: ["deepseek", "custom-anthropic", "custom-openai"],
     providerAuth: {
       deepseek: ["api_key"],
     },
@@ -132,6 +142,23 @@ export function harnessSupportsModel(harness: HarnessId, model: string): boolean
   if (families === "any") return true;
   const { provider } = extractProviderAndModel(model);
   return families.includes(modelFamilyForProvider(provider));
+}
+
+/**
+ * Whether a custom-provider model runs on the harness, given the wire protocol
+ * the registry carries for it. The ID alone cannot answer this: both OpenAI
+ * wire protocols share the `cpo-` prefix, so protocol-restricted harnesses
+ * (Codex runs Responses only) need the registry metadata callers already hold.
+ */
+export function harnessSupportsCustomModel(
+  harness: HarnessId,
+  model: string,
+  protocol?: CustomProviderProtocol
+): boolean {
+  if (!harnessSupportsModel(harness, model)) return false;
+  if (protocol === undefined) return true;
+  const allowed = getHarnessCapabilities(harness).customProviderProtocols;
+  return allowed === undefined || allowed.includes(protocol);
 }
 
 /**

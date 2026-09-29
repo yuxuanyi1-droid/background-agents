@@ -6,7 +6,7 @@
  */
 
 import { SUBSCRIPTION_PROVIDER_IDS, type SubscriptionProviderId } from "./types/provider-accounts";
-import { isCustomModelId } from "./types/custom-providers";
+import { isCustomModelId, type CustomProviderProtocol } from "./types/custom-providers";
 
 /**
  * Reasoning effort levels supported across providers.
@@ -378,6 +378,13 @@ export interface ModelDisplayInfo {
   id: string;
   name: string;
   description: string;
+  /**
+   * Reasoning efforts the registry lists for a custom-provider model.
+   * Static-catalog models carry theirs in MODEL_REASONING_CONFIG instead.
+   */
+  reasoningEfforts?: readonly ReasoningEffort[];
+  /** Wire protocol of a custom-provider model; absent for static models. */
+  protocol?: CustomProviderProtocol;
 }
 
 export interface ModelCategory {
@@ -519,6 +526,32 @@ export function supportsReasoning(model: string): boolean {
   return getReasoningConfig(model) !== undefined;
 }
 
+/** Menu order for efforts a registry may list in any order. */
+const REASONING_EFFORT_ORDER: readonly ReasoningEffort[] = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+/**
+ * Reasoning config for a custom-provider model, from the efforts its
+ * registry entry lists. The registry's "none" only marks a gateway that
+ * accepts disabling reasoning, which the effort menu's Default row already
+ * covers, so it is not offered as a selectable effort.
+ */
+export function customModelReasoningConfig(
+  efforts: readonly ReasoningEffort[]
+): ModelReasoningConfig | undefined {
+  const selectable = REASONING_EFFORT_ORDER.filter((effort) => efforts.includes(effort));
+  if (selectable.length === 0) return undefined;
+  return {
+    efforts: [...selectable],
+    default: selectable.includes("high") ? "high" : selectable[selectable.length - 1],
+  };
+}
+
 /**
  * Get reasoning configuration for a model, or undefined if not supported.
  */
@@ -536,12 +569,18 @@ export function getDefaultReasoningEffort(model: string): ReasoningEffort | unde
 }
 
 /**
- * Check if a reasoning effort is valid for a given model.
+ * Check if a reasoning effort is valid for a given model. Custom-provider
+ * models have no static config; their valid efforts come from the registry
+ * via `customEfforts`.
  */
-export function isValidReasoningEffort(model: string, effort: string): boolean {
+export function isValidReasoningEffort(
+  model: string,
+  effort: string,
+  customEfforts?: readonly ReasoningEffort[]
+): boolean {
   const config = getReasoningConfig(model);
-  if (!config) return false;
-  return config.efforts.includes(effort as ReasoningEffort);
+  if (config) return config.efforts.includes(effort as ReasoningEffort);
+  return customEfforts?.includes(effort as ReasoningEffort) ?? false;
 }
 
 /**

@@ -17,7 +17,9 @@ import {
   getDefaultReasoningEffort,
   getValidModelOrDefault,
   isSelectableModelId,
+  type ReasoningEffort,
 } from "@open-inspect/shared/models";
+import { isCustomModelId } from "@open-inspect/shared/types/custom-providers";
 import type { SandboxEvent } from "@open-inspect/shared/types/sandbox-events";
 import { isSessionPromptable } from "@open-inspect/shared/types/session-activity";
 import { MAX_UNFINISHED_PROMPTS } from "@open-inspect/shared/types/prompts";
@@ -172,8 +174,26 @@ export class SessionMessageQueue {
     /** Resolved per use so it honors settings persisted after construction. */
     private readonly getExecutionTimeoutMs: () => number,
     private readonly mayDispatch: () => boolean,
-    private readonly getSandboxPromptBlockReason: () => string | null
+    private readonly getSandboxPromptBlockReason: () => string | null,
+    /**
+     * Reasoning efforts the custom-provider registry lists for a model.
+     * Resolved per use so models imported after construction are honored.
+     */
+    private readonly getCustomModelReasoningEfforts?: (
+      model: string
+    ) => Promise<readonly ReasoningEffort[] | undefined>
   ) {}
+
+  private async loadCustomModelEfforts(
+    model: string
+  ): Promise<readonly ReasoningEffort[] | undefined> {
+    if (!this.getCustomModelReasoningEfforts || !isCustomModelId(model)) return undefined;
+    try {
+      return await this.getCustomModelReasoningEfforts(model);
+    } catch {
+      return undefined;
+    }
+  }
 
   async enqueueAutofix(
     command: Extract<GitHubAutofixSessionCommand, { type: "enqueue_feedback" }>
@@ -524,7 +544,12 @@ export class SessionMessageQueue {
       session?.reasoning_effort ??
       getDefaultReasoningEffort(resolvedModel);
     const resolvedEffort =
-      validateReasoningEffort(resolvedModel, requestedEffort ?? undefined, this.log) ?? undefined;
+      validateReasoningEffort(
+        resolvedModel,
+        requestedEffort ?? undefined,
+        this.log,
+        requestedEffort ? await this.loadCustomModelEfforts(resolvedModel) : undefined
+      ) ?? undefined;
 
     const command: SandboxCommand = {
       type: "prompt",
@@ -820,7 +845,10 @@ export class SessionMessageQueue {
     const messageReasoningEffort = validateReasoningEffort(
       effectiveModelForEffort,
       data.reasoningEffort,
-      this.log
+      this.log,
+      data.reasoningEffort
+        ? await this.loadCustomModelEfforts(effectiveModelForEffort)
+        : undefined
     );
     try {
       this.messageRepository.createMessageWithAttachments(

@@ -7,6 +7,7 @@ import {
   getValidHarnessOrDefault,
 } from "@open-inspect/shared/harnesses";
 import { getValidModelOrDefault, isValidReasoningEffort } from "@open-inspect/shared/models";
+import { customModelReasoningEfforts } from "./custom-model-efforts";
 import type { CreateSessionResponse } from "@open-inspect/shared/types/session-api";
 import { generateId } from "../auth/crypto";
 import { resolveGitHubCredentialAuthority } from "../source-control/github-credential-authority";
@@ -194,7 +195,12 @@ export async function handleCreateSession(
   const harnessModelIncompatibility = checkHarnessCompatibility(harness, model);
   if (harnessModelIncompatibility) return error(harnessModelIncompatibility.message, 400);
   const reasoningEffort =
-    body.reasoningEffort && isValidReasoningEffort(model, body.reasoningEffort)
+    body.reasoningEffort &&
+    isValidReasoningEffort(
+      model,
+      body.reasoningEffort,
+      await customModelReasoningEfforts(ctx.db, env.PROVIDER_ACCOUNTS_ENCRYPTION_KEY, model)
+    )
       ? body.reasoningEffort
       : null;
 

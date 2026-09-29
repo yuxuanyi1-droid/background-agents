@@ -1,7 +1,7 @@
 import {
   filterModelsForHarness,
   getHarnessLabel,
-  harnessSupportsModel,
+  harnessSupportsCustomModel,
   type HarnessId,
 } from "@open-inspect/shared/harnesses";
 import type { ModelCategory, ReasoningEffort } from "@open-inspect/shared/models";
@@ -15,7 +15,9 @@ export function filterModelOptionsForHarness(
   return options
     .map((group) => ({
       ...group,
-      models: group.models.filter((model) => harnessSupportsModel(harness, model.id)),
+      models: group.models.filter((model) =>
+        harnessSupportsCustomModel(harness, model.id, model.protocol)
+      ),
     }))
     .filter((group) => group.models.length > 0);
 }
@@ -56,7 +58,11 @@ export function resolveHarnessModelSelection({
 }): HarnessModelSelection {
   const options = filterModelOptionsForHarness(harness, enabledModelOptions);
   if (loading) {
-    return { availability: { status: "loading" }, options, ...resolveModelPreference(preference) };
+    return {
+      availability: { status: "loading" },
+      options,
+      ...resolveModelPreference(preference, undefined, enabledModelOptions),
+    };
   }
   const models = filterModelsForHarness(harness, enabledModels);
   if (models.length === 0) {
@@ -66,12 +72,12 @@ export function resolveHarnessModelSelection({
         message: `No enabled models can run on ${getHarnessLabel(harness)}.`,
       },
       options,
-      ...resolveModelPreference(preference),
+      ...resolveModelPreference(preference, undefined, enabledModelOptions),
     };
   }
   return {
     availability: { status: "available" },
     options,
-    ...resolveModelPreference(preference, models),
+    ...resolveModelPreference(preference, models, enabledModelOptions),
   };
 }

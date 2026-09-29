@@ -13,6 +13,7 @@ import {
   getReasoningConfig,
   getValidModelOrDefault,
   isValidModel,
+  customModelReasoningConfig,
   isValidReasoningEffort,
   normalizeModelId,
   normalizeValidModels,
@@ -501,7 +502,34 @@ describe("model utilities", () => {
     expect(isValidReasoningEffort("deepseek/deepseek-v4-pro", "high")).toBe(false);
     expect(isValidReasoningEffort("invalid", "high")).toBe(false);
     expect(isValidReasoningEffort("anthropic/claude-sonnet-4-5", "")).toBe(false);
+  });  it("validates custom-provider reasoning efforts from the registry", () => {
+    // No static config: validity comes only from the provided registry list.
+    expect(isValidReasoningEffort("cpa-0799807a/glm-5.3", "high")).toBe(false);
+    expect(isValidReasoningEffort("cpa-0799807a/glm-5.3", "high", ["low", "high"])).toBe(true);
+    expect(isValidReasoningEffort("cpa-0799807a/glm-5.3", "max", ["low", "high"])).toBe(false);
+    // A static model keeps its catalog efforts regardless of the list.
+    expect(isValidReasoningEffort("anthropic/claude-sonnet-4-5", "low", ["low"])).toBe(false);
   });
+
+  it("builds a custom model reasoning config from registry efforts", () => {
+    expect(customModelReasoningConfig([])).toBeUndefined();
+    expect(customModelReasoningConfig(["none"])).toBeUndefined();
+    // "none" is never selectable; the default prefers "high", else the last.
+    expect(customModelReasoningConfig(["none", "low", "medium", "high"])).toEqual({
+      efforts: ["low", "medium", "high"],
+      default: "high",
+    });
+    expect(customModelReasoningConfig(["medium", "max"])).toEqual({
+      efforts: ["medium", "max"],
+      default: "max",
+    });
+    // Registry order is arbitrary; the menu orders by severity.
+    expect(customModelReasoningConfig(["xhigh", "max", "high"])).toEqual({
+      efforts: ["high", "xhigh", "max"],
+      default: "high",
+    });
+  });
+
 
   it("groups display options and excludes opt-in providers from default enabled models", () => {
     expect(

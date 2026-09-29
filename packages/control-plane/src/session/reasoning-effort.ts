@@ -3,16 +3,18 @@
  * Returns the validated effort string or null if invalid/absent.
  */
 
-import { isValidReasoningEffort } from "@open-inspect/shared/models";
+import { isValidReasoningEffort, type ReasoningEffort } from "@open-inspect/shared/models";
 import type { Logger } from "../logger";
 
 export function validateReasoningEffort(
   model: string,
   effort: string | undefined,
-  log: Logger
+  log: Logger,
+  /** Registry-listed efforts for a custom-provider model; no static config exists. */
+  customEfforts?: readonly ReasoningEffort[]
 ): string | null {
   if (!effort) return null;
-  if (isValidReasoningEffort(model, effort)) return effort;
+  if (isValidReasoningEffort(model, effort, customEfforts)) return effort;
   log.warn("Invalid reasoning effort for model, ignoring", {
     model,
     reasoning_effort: effort,

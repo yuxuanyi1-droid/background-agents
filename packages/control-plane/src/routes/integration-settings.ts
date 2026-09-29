@@ -14,6 +14,7 @@ import {
   type VncSettings,
 } from "@open-inspect/shared/types/integrations";
 import { isValidReasoningEffort } from "@open-inspect/shared/models";
+import { customModelReasoningEfforts } from "./custom-model-efforts";
 import {
   IntegrationSettingsStore,
   IntegrationSettingsValidationError,
@@ -399,7 +400,15 @@ async function handleGetResolvedConfig(
     const reasoningEffort =
       githubSettings.model &&
       githubSettings.reasoningEffort &&
-      !isValidReasoningEffort(githubSettings.model, githubSettings.reasoningEffort)
+      !isValidReasoningEffort(
+        githubSettings.model,
+        githubSettings.reasoningEffort,
+        await customModelReasoningEfforts(
+          ctx.db,
+          env.PROVIDER_ACCOUNTS_ENCRYPTION_KEY,
+          githubSettings.model
+        )
+      )
         ? null
         : (githubSettings.reasoningEffort ?? null);
 
@@ -423,7 +432,15 @@ async function handleGetResolvedConfig(
     const linearReasoningEffort =
       linearSettings.model &&
       linearSettings.reasoningEffort &&
-      !isValidReasoningEffort(linearSettings.model, linearSettings.reasoningEffort)
+      !isValidReasoningEffort(
+        linearSettings.model,
+        linearSettings.reasoningEffort,
+        await customModelReasoningEfforts(
+          ctx.db,
+          env.PROVIDER_ACCOUNTS_ENCRYPTION_KEY,
+          linearSettings.model
+        )
+      )
         ? null
         : (linearSettings.reasoningEffort ?? null);
 

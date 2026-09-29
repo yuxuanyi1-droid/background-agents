@@ -2,7 +2,8 @@ import { z } from "zod";
 import type { Logger } from "../../../logger";
 import type { RepositoryRef } from "@open-inspect/shared/types/repositories";
 import { getValidHarnessOrDefault, harnessIdSchema } from "@open-inspect/shared/harnesses";
-import { getValidModelOrDefault, isSelectableModelId } from "@open-inspect/shared/models";
+import { getValidModelOrDefault, isSelectableModelId, type ReasoningEffort } from "@open-inspect/shared/models";
+import { isCustomModelId } from "@open-inspect/shared/types/custom-providers";
 import type { SpawnSource } from "@open-inspect/shared/types/sessions";
 import { normalizeSandboxSettings } from "../../../sandbox/settings";
 import { DEFAULT_BASE_BRANCH } from "../../../repos/default-branch";
@@ -94,7 +95,11 @@ export class SessionInitHandler {
     private readonly scheduleWarmSandbox: () => void,
     private readonly encryptScmToken: (token: string) => Promise<string>,
     private readonly generateId: (bytes?: number) => string,
-    private readonly now: () => number = Date.now
+    private readonly now: () => number = Date.now,
+    /** Registry-listed efforts for a custom-provider model; resolved per use. */
+    private readonly getCustomModelReasoningEfforts?: (
+      model: string
+    ) => Promise<readonly ReasoningEffort[] | undefined>
   ) {}
 
   async init(request: Request, log: Logger): Promise<Response> {
@@ -159,7 +164,14 @@ export class SessionInitHandler {
       });
     }
 
-    const reasoningEffort = validateReasoningEffort(model, body.reasoningEffort ?? undefined, log);
+    const reasoningEffort = validateReasoningEffort(
+      model,
+      body.reasoningEffort ?? undefined,
+      log,
+      body.reasoningEffort && this.getCustomModelReasoningEfforts && isCustomModelId(model)
+        ? await this.getCustomModelReasoningEfforts(model)
+        : undefined
+    );
     const baseBranch = hasRepoOwner
       ? body.branch || body.defaultBranch || DEFAULT_BASE_BRANCH
       : null;

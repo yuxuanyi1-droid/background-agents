@@ -6,6 +6,7 @@ import {
   checkHarnessCompatibility,
   filterModelsForHarness,
   getValidHarnessOrDefault,
+  harnessSupportsCustomModel,
   harnessSupportsModel,
   harnessSupportsProviderAuth,
   isValidHarness,
@@ -190,5 +191,34 @@ describe("checkHarnessCompatibility", () => {
         openai: "api_key",
       })
     ).toBeNull();
+  });
+});
+
+describe("harnessSupportsCustomModel", () => {
+  it("restricts codex custom gateways to the Responses wire protocol", () => {
+    expect(harnessSupportsCustomModel("codex", "cpo-99887766/glm-5.3", "openai_responses")).toBe(
+      true
+    );
+    expect(harnessSupportsCustomModel("codex", "cpo-99887766/glm-5.3", "openai_compatible")).toBe(
+      false
+    );
+    // Without registry metadata the family check alone decides.
+    expect(harnessSupportsCustomModel("codex", "cpo-99887766/glm-5.3")).toBe(true);
+    expect(harnessSupportsCustomModel("codex", "cpa-00112233/glm-5.3", "anthropic")).toBe(false);
+  });
+
+  it("runs every custom protocol on pi and dsh", () => {
+    for (const harness of ["pi", "dsh"] as const) {
+      for (const protocol of ["anthropic", "openai_compatible", "openai_responses"] as const) {
+        expect(harnessSupportsCustomModel(harness, "cpo-99887766/glm-5.3", protocol)).toBe(true);
+        expect(harnessSupportsCustomModel(harness, "cpa-00112233/glm-5.3", protocol)).toBe(true);
+      }
+    }
+  });
+
+  it("keeps zcode on its static family until its runtime support lands", () => {
+    expect(harnessSupportsCustomModel("zcode", "cpo-99887766/glm-5.3", "openai_responses")).toBe(
+      false
+    );
   });
 });

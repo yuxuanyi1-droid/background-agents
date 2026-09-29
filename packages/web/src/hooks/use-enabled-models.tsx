@@ -65,6 +65,8 @@ export function useEnabledModels(): {
         id: model.id,
         name: model.displayName,
         description: `${model.providerName} · ${model.protocol === "anthropic" ? "Anthropic" : "OpenAI-compatible"} protocol`,
+        reasoningEfforts: model.reasoningEfforts,
+        protocol: model.protocol,
       });
       groups.set(category, group);
     }

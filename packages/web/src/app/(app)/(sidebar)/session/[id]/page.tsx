@@ -31,10 +31,9 @@ import {
 import { useMediaQuery } from "@/hooks/use-media-query";
 import {
   DEFAULT_MODEL,
-  getDefaultReasoningEffort,
   type ReasoningEffort,
 } from "@open-inspect/shared/models";
-import type { ModelPreference } from "@/lib/model-selection";
+import { defaultReasoningEffort, type ModelPreference } from "@/lib/model-selection";
 import type { HarnessId } from "@open-inspect/shared/harnesses";
 import { resolveHarnessModelSelection } from "@/lib/session-harness";
 import { useEnabledModels } from "@/hooks/use-enabled-models";
@@ -651,7 +650,8 @@ function useModelSelection(sessionState: SessionState, harness: HarnessId) {
   const { enabledModels, enabledModelOptions, loading: loadingEnabledModels } = useEnabledModels();
   const sessionModel = sessionState?.model ?? DEFAULT_MODEL;
   const sessionReasoningEffort =
-    sessionState?.reasoningEffort ?? getDefaultReasoningEffort(sessionModel);
+    sessionState?.reasoningEffort ??
+    defaultReasoningEffort(sessionModel, enabledModelOptions);
   const {
     model: selectedModel,
     reasoningEffort,
@@ -679,9 +679,15 @@ function useModelSelection(sessionState: SessionState, harness: HarnessId) {
       sessionReasoningEffort,
     ]
   );
-  const handleModelChange = useCallback((model: string) => {
-    setModelPreferenceDraft({ model, reasoningEffort: getDefaultReasoningEffort(model) });
-  }, []);
+  const handleModelChange = useCallback(
+    (model: string) => {
+      setModelPreferenceDraft({
+        model,
+        reasoningEffort: defaultReasoningEffort(model, enabledModelOptions),
+      });
+    },
+    [enabledModelOptions]
+  );
 
   const setReasoningEffort = useCallback(
     (nextReasoningEffort: ReasoningEffort | undefined) => {

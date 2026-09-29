@@ -9,7 +9,7 @@ import {
   validateAutomationTargetCounts,
 } from "@open-inspect/shared/types/automations";
 import type { PermissionId } from "@open-inspect/shared/rbac";
-import { isValidReasoningEffort } from "@open-inspect/shared/models";
+import { isValidReasoningEffort, type ReasoningEffort } from "@open-inspect/shared/models";
 import { type AutomationRepositoryInsert } from "../db/automation-store";
 import { EnvironmentStore } from "../db/environments";
 import { type RequestContext, json, resolveRepoOrError } from "./shared";
@@ -120,10 +120,11 @@ export const FAR_FUTURE_THRESHOLD_MS = 31 * 24 * 60 * 60 * 1000;
 
 export function resolveReasoningEffort(
   model: string,
-  reasoningEffort: string | null | undefined
+  reasoningEffort: string | null | undefined,
+  customEfforts?: readonly ReasoningEffort[]
 ): string | null {
   if (reasoningEffort === undefined || reasoningEffort === null) return null;
-  return isValidReasoningEffort(model, reasoningEffort) ? reasoningEffort : null;
+  return isValidReasoningEffort(model, reasoningEffort, customEfforts) ? reasoningEffort : null;
 }
 
 type NormalizedRepositoryInput = NonNullable<CreateAutomationBody["repositories"]>[number];

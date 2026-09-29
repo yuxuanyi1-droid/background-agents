@@ -22,7 +22,7 @@ import {
   type ModelCategory,
   type ReasoningEffort,
 } from "@open-inspect/shared/models";
-import type { ModelPreference } from "@/lib/model-selection";
+import { defaultReasoningEffort, type ModelPreference } from "@/lib/model-selection";
 import {
   DEFAULT_HARNESS,
   getValidHarnessOrDefault,
@@ -259,9 +259,12 @@ export default function Home() {
 
   const handleModelChange = useCallback(
     (model: string) => {
-      saveModelPreferenceDraft({ model, reasoningEffort: getDefaultReasoningEffort(model) });
+      saveModelPreferenceDraft({
+        model,
+        reasoningEffort: defaultReasoningEffort(model, enabledModelOptions),
+      });
     },
-    [saveModelPreferenceDraft]
+    [enabledModelOptions, saveModelPreferenceDraft]
   );
 
   const handleReasoningEffortChange = useCallback(

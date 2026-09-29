@@ -22,7 +22,7 @@
  */
 
 import { resolveAppName } from "@open-inspect/shared/app-name";
-import { DEFAULT_MODEL } from "@open-inspect/shared/models";
+import { DEFAULT_MODEL, type ReasoningEffort } from "@open-inspect/shared/models";
 import { sandboxPromptBlockReason } from "@open-inspect/shared/types/sandbox-shutdown";
 import { generateId, hashToken, encryptToken } from "../auth/crypto";
 import { getUserAuth } from "../auth/user/runtime";
@@ -49,6 +49,7 @@ import {
 } from "../sandbox/lifecycle/manager";
 import { resolveBootBudgetTimeoutMs } from "../sandbox/lifecycle/decisions";
 import { McpServerStore } from "../db/mcp-servers";
+import { CustomProviderStore } from "../db/custom-providers";
 import { UserStore } from "../db/user-store";
 import { IntegrationSettingsStore, resolveSlackSettings } from "../db/integration-settings";
 import { SessionIndexStore } from "../db/session-index";
@@ -487,6 +488,17 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     (): void => messageQueue.broadcastPromptQueue(),
     (): Promise<void> => messageQueue.processMessageQueue()
   );
+  // Custom-provider models validate reasoning efforts against the registry;
+  // resolved per use so models imported later are honored without recreation.
+  const getCustomModelReasoningEfforts = (
+    model: string
+  ): Promise<readonly ReasoningEffort[] | undefined> => {
+    if (!env.PROVIDER_ACCOUNTS_ENCRYPTION_KEY) return Promise.resolve(undefined);
+    return new CustomProviderStore(db, env.PROVIDER_ACCOUNTS_ENCRYPTION_KEY)
+      .resolveCustomModel(model)
+      .then((resolved) => resolved?.model.reasoningEfforts)
+      .catch(() => undefined);
+  };
   const messageQueue: SessionMessageQueue = new SessionMessageQueue(
     backgroundTasks,
     log,
@@ -508,7 +520,8 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     executionStop,
     getExecutionTimeoutMs,
     () => lifecycleManager.mayProcessQueuedWork(),
-    () => sandboxPromptBlockReason(lifecycleManager.shutdownSnapshot())
+    () => sandboxPromptBlockReason(lifecycleManager.shutdownSnapshot()),
+    getCustomModelReasoningEfforts
   );
 
   // Tier 7 — services over the queue and lifecycle.
@@ -732,7 +745,9 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
         name: "sandbox.warm",
       }),
     (token) => encryptToken(token, tokenEncryptionKey),
-    generateId
+    generateId,
+    Date.now,
+    getCustomModelReasoningEfforts
   );
   const sessionLifecycleHandler = new SessionLifecycleHandler(
     sessionCoreRepository,

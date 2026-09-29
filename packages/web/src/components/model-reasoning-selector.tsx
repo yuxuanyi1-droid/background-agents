@@ -2,6 +2,7 @@
 
 import { Fragment, useState } from "react";
 import {
+  customModelReasoningConfig,
   getReasoningConfig,
   type ModelCategory,
   type ReasoningEffort,
@@ -61,15 +62,17 @@ export function ModelReasoningSelector({
 }: ModelReasoningSelectorProps) {
   const isMobile = useIsMobile();
   const [mobileView, setMobileView] = useState<"main" | "agent" | "model" | "effort">("main");
-  const reasoningConfig = getReasoningConfig(selectedModel);
-  const selectedEffort = reasoningEffort ?? reasoningConfig?.default;
-  const effortLabel = selectedEffort ? formatEffort(selectedEffort) : "Default";
-  // Custom-provider models carry their display name in the options list, not
-  // the static catalog; an option that vanished from the list falls back to
-  // the raw ID.
+  // Custom-provider models carry their reasoning efforts in the options
+  // list, not the static catalog.
   const selectedOption = items
     .flatMap((group) => group.models)
     .find(({ id }) => id === selectedModel);
+  const reasoningConfig =
+    getReasoningConfig(selectedModel) ??
+    customModelReasoningConfig(selectedOption?.reasoningEfforts ?? []);
+  const selectedEffort = reasoningEffort ?? reasoningConfig?.default;
+  const effortLabel = selectedEffort ? formatEffort(selectedEffort) : "Default";
+  // An option that vanished from the list falls back to the raw ID.
   const modelLabel = selectedOption
     ? selectedOption.name.toLowerCase()
     : formatModelNameLower(selectedModel);

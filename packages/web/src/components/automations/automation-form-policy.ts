@@ -12,7 +12,11 @@ import {
   validateAutomationTargetCounts,
   type AutomationRepositoryInput,
 } from "@open-inspect/shared/types/automations";
-import { DEFAULT_MODEL, isValidReasoningEffort } from "@open-inspect/shared/models";
+import {
+  DEFAULT_MODEL,
+  isValidReasoningEffort,
+  type ReasoningEffort,
+} from "@open-inspect/shared/models";
 import {
   getValidHarnessOrDefault,
   reconcileProviderSelectionsForHarness,
@@ -237,10 +241,13 @@ function buildSubmissionValues({
   draft,
   resolvedModel,
   targets,
+  customEfforts,
 }: {
   mode: AutomationFormMode;
   draft: AutomationFormDraft;
   resolvedModel: string;
+  /** Registry-listed efforts when the model routes to a custom provider. */
+  customEfforts?: readonly ReasoningEffort[];
   targets: {
     repositories: AutomationRepositoryInput[];
     environmentIds: string[];
@@ -254,7 +261,7 @@ function buildSubmissionValues({
     model: resolvedModel,
     reasoningEffort:
       draft.agent.reasoningEffort &&
-      isValidReasoningEffort(resolvedModel, draft.agent.reasoningEffort)
+      isValidReasoningEffort(resolvedModel, draft.agent.reasoningEffort, customEfforts)
         ? draft.agent.reasoningEffort
         : null,
     instructions: draft.instructions.trim(),
@@ -285,12 +292,15 @@ export function evaluateAutomationForm({
   resolvedModel,
   targets,
   originalTrigger,
+  customEfforts,
 }: {
   mode: AutomationFormMode;
   draft: AutomationFormDraft;
   modelAvailability: HarnessModelAvailability;
   resolvedModel: string;
   originalTrigger?: AutomationTriggerDraft;
+  /** Registry-listed efforts when the model routes to a custom provider. */
+  customEfforts?: readonly ReasoningEffort[];
   targets: {
     repositories: AutomationRepositoryInput[];
     environmentIds: string[];
@@ -308,6 +318,6 @@ export function evaluateAutomationForm({
 
   return {
     valid: true,
-    values: buildSubmissionValues({ mode, draft, resolvedModel, targets }),
+    values: buildSubmissionValues({ mode, draft, resolvedModel, targets, customEfforts }),
   };
 }

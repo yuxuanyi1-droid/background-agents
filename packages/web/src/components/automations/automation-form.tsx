@@ -4,6 +4,7 @@ import { useCallback, useState, useMemo } from "react";
 import { useRepos } from "@/hooks/use-repos";
 import { useEnvironments } from "@/hooks/use-environments";
 import { useEnabledModels } from "@/hooks/use-enabled-models";
+import { customModelEfforts } from "@/lib/model-selection";
 import { reconcileProviderSelectionsForHarness } from "@open-inspect/shared/harnesses";
 import { resolveHarnessModelSelection } from "@/lib/session-harness";
 import { SUBSCRIPTION_PROVIDER_IDS } from "@open-inspect/shared/types/provider-accounts";
@@ -103,6 +104,7 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
   }, []);
 
   const formEvaluation = evaluateAutomationForm({
+    customEfforts: customModelEfforts(resolvedModel, enabledModelOptions),
     mode,
     originalTrigger: initialDraft.trigger,
     modelAvailability: modelSelection.availability,
