@@ -25,7 +25,7 @@ mkdir -p /opt/openinspect/zcode
 tar -xzf "$download_dir/zcode.tar.gz" -C /opt/openinspect/zcode --strip-components=1
 (
   cd /opt/openinspect/zcode
-  pnpm install --filter @zcode/cli... --frozen-lockfile --ignore-scripts --no-fund --store-dir /tmp/openinspect-pnpm-store
+  pnpm install --filter @zcode/cli... --frozen-lockfile --ignore-scripts --store-dir /tmp/openinspect-pnpm-store
   pnpm --filter @zcode/cli... build
 )
 printf '#!/bin/sh\nexec node /opt/openinspect/zcode/apps/zcode-cli/packages/cli/dist/zcode.cjs "$@"\n' > /usr/local/bin/zcode
