@@ -6,6 +6,7 @@
  */
 
 import { SUBSCRIPTION_PROVIDER_IDS, type SubscriptionProviderId } from "./types/provider-accounts";
+import { isCustomModelId } from "./types/custom-providers";
 
 /**
  * Reasoning effort levels supported across providers.
@@ -373,7 +374,8 @@ export const MODEL_REASONING_CONFIG: Partial<Record<ValidModel, ModelReasoningCo
   );
 
 export interface ModelDisplayInfo {
-  id: ValidModel;
+  /** Model ID: a static-catalog id or a custom-provider id (`cp[ao]-…/model`). */
+  id: string;
   name: string;
   description: string;
 }
@@ -460,15 +462,15 @@ export function normalizeValidModels(modelIds: readonly string[]): ValidModel[] 
 }
 
 export interface ModelPreferenceChange {
-  modelId: ValidModel;
+  modelId: string;
   enabled: boolean;
 }
 
 /** Apply ordered set-membership changes while preserving the order of existing models. */
 export function applyModelPreferenceChanges(
-  enabledModels: readonly ValidModel[],
+  enabledModels: readonly string[],
   changes: readonly ModelPreferenceChange[]
-): ValidModel[] {
+): string[] {
   const next = new Set(enabledModels);
   for (const { modelId, enabled } of changes) {
     if (enabled) {
@@ -485,7 +487,7 @@ export function resolveEnabledModel(options: {
   model?: string | null;
   enabledModels?: readonly string[];
   fallbackModel?: string | null;
-}): ValidModel {
+}): string {
   const fallback = getValidModelOrDefault(options.fallbackModel);
   const desired =
     options.model && isValidModel(options.model)
@@ -494,7 +496,7 @@ export function resolveEnabledModel(options: {
   if (!options.enabledModels) return desired;
 
   const enabledModels = normalizeValidModels(options.enabledModels);
-  const enabled = new Set(enabledModels);
+  const enabled = new Set<string>(enabledModels);
   if (enabled.has(desired)) return desired;
   if (enabled.has(fallback)) return fallback;
   return enabledModels[0] ?? fallback;
@@ -571,10 +573,25 @@ export function getSubscriptionProviderForModel(modelId: string): SubscriptionPr
 /**
  * Get a valid model, migrate retired Codex selections, or fall back to default.
  * Accepts both prefixed and bare formats; always returns canonical prefixed format.
+ * A well-formed custom-provider model ID (`cp[ao]-xxxxxxxx/model`) passes
+ * through unchanged: its provider is validated against the custom-provider
+ * registry, not the static catalog.
  */
-export function getValidModelOrDefault(model: string | undefined | null): ValidModel {
+export function getValidModelOrDefault(model: string | undefined | null): string {
+  if (model && isCustomModelId(model)) {
+    return model;
+  }
   if (model && isValidModel(model)) {
     return normalizeModelId(model) as ValidModel;
   }
   return (model && retiredModelReplacement(model)) || DEFAULT_MODEL;
+}
+
+/**
+ * Whether a model ID may be selected for a session: a static-catalog model
+ * or a well-formed custom-provider model. Dynamic validity (the provider
+ * still exists and the model is enabled) is checked at prompt time.
+ */
+export function isSelectableModelId(model: string): boolean {
+  return isCustomModelId(model) || isValidModel(model);
 }

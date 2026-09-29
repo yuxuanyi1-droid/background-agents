@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from .constants import OPENCODE_PORT
+from .custom_providers import load_custom_providers, opencode_provider_config
 from .git_excludes import install_runtime_git_excludes
 from .mcp_packages import McpPackageInstaller
 from .process_output import iter_process_lines
@@ -413,6 +414,16 @@ class OpenCodeServer:
                 }
             },
         }
+
+        # Custom providers arrive as an env manifest from the control plane
+        # (routing + model metadata here, keys in CP_*_API_KEY vars).
+        custom_providers = load_custom_providers(os.environ)
+        if custom_providers:
+            opencode_config["provider"].update(opencode_provider_config(custom_providers))
+            self.log.info(
+                "custom_providers.configured",
+                providers=[provider.provider_key for provider in custom_providers],
+            )
 
         # Inject MCP servers
         mcp_servers = self._resolve_mcp_servers()

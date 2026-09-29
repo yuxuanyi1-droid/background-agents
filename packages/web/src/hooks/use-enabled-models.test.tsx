@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { SWRConfig, useSWRConfig } from "swr";
 import { DEFAULT_ENABLED_MODELS } from "@open-inspect/shared/models";
-import { MODEL_PREFERENCES_KEY, useEnabledModels } from "./use-enabled-models";
+import { MODEL_PREFERENCES_KEY, CUSTOM_MODELS_KEY, useEnabledModels } from "./use-enabled-models";
 
 afterEach(() => {
   cleanup();
@@ -171,11 +171,12 @@ describe("useEnabledModels", () => {
     expect(result.current.saving).toBe(false);
   });
 
-  it("only dispatches the model preferences resource through the global fetcher", async () => {
-    const fetcher = vi.fn(async (_key: string) => ({
-      enabledModels: ["openai/gpt-5.4"],
-      revision: 1,
-    }));
+  it("dispatches the model preferences and custom models resources through the global fetcher", async () => {
+    const fetcher = vi.fn(async (key: string) =>
+      key === MODEL_PREFERENCES_KEY
+        ? { enabledModels: ["openai/gpt-5.4"], revision: 1 }
+        : { models: [] }
+    );
     vi.stubGlobal(
       "fetch",
       vi
@@ -194,7 +195,10 @@ describe("useEnabledModels", () => {
     await act(async () => {
       await result.current.updateModels([{ modelId: "anthropic/claude-haiku-4-5", enabled: true }]);
     });
-    expect(fetcher.mock.calls.map(([key]) => key)).toEqual([MODEL_PREFERENCES_KEY]);
+    expect(fetcher.mock.calls.map(([key]) => key)).toEqual([
+      MODEL_PREFERENCES_KEY,
+      CUSTOM_MODELS_KEY,
+    ]);
   });
 
   it("exposes read errors and rejects writes before preferences have loaded", async () => {

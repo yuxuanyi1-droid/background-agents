@@ -1,0 +1,195 @@
+/**
+ * Custom model providers: deployment-level gateway definitions an
+ * administrator registers (base URL, API key, protocol, custom headers),
+ * plus the per-model metadata imported from the gateway's model list.
+ *
+ * Model IDs are namespaced by provider: `cpa-{8hex}/{upstream-model-id}`
+ * for Anthropic-protocol gateways and `cpo-{8hex}/{upstream-model-id}` for
+ * OpenAI-compatible ones. The 8-hex segment is the first 8 characters of the
+ * provider's canonical 32-hex ID, so the provider a model routes to is
+ * recoverable from the model ID alone without a catalog lookup.
+ */
+
+import { z } from "zod";
+
+export const CUSTOM_PROVIDER_PROTOCOLS = ["anthropic", "openai_compatible"] as const;
+export type CustomProviderProtocol = (typeof CUSTOM_PROVIDER_PROTOCOLS)[number];
+export const customProviderProtocolSchema = z.enum(CUSTOM_PROVIDER_PROTOCOLS);
+
+/** Custom provider IDs use the installation's canonical 16-byte hex ID format. */
+export const CUSTOM_PROVIDER_ID_PATTERN = /^[0-9a-f]{32}$/;
+export const customProviderIdSchema = z.string().regex(CUSTOM_PROVIDER_ID_PATTERN);
+
+/** Short provider key embedded in model IDs: `cpa`/`cpo` plus 8 hex chars. */
+export const CUSTOM_PROVIDER_KEY_PATTERN = /^cp[ao]-[0-9a-f]{8}$/;
+
+export const CUSTOM_MODEL_MODALITIES = ["text", "image", "video", "audio"] as const;
+export type CustomModelModality = (typeof CUSTOM_MODEL_MODALITIES)[number];
+export const customModelModalitySchema = z.enum(CUSTOM_MODEL_MODALITIES);
+
+export const CUSTOM_MODEL_REASONING_EFFORTS = [
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+export const customModelReasoningEffortSchema = z.enum(CUSTOM_MODEL_REASONING_EFFORTS);
+
+/** The stable 12-char provider key (`cpa-xxxxxxxx` / `cpo-xxxxxxxx`) for a provider ID. */
+export function customProviderKey(providerId: string, protocol: CustomProviderProtocol): string {
+  if (!CUSTOM_PROVIDER_ID_PATTERN.test(providerId)) {
+    throw new Error(`Invalid custom provider id: ${providerId}`);
+  }
+  return `${protocol === "anthropic" ? "cpa" : "cpo"}-${providerId.slice(0, 8)}`;
+}
+
+/** Whether a model ID's provider segment is a custom provider key. */
+export function isCustomProviderKey(value: string): boolean {
+  return CUSTOM_PROVIDER_KEY_PATTERN.test(value);
+}
+
+/** Whether a full model ID routes to a custom provider. */
+export function isCustomModelId(modelId: string): boolean {
+  const slash = modelId.indexOf("/");
+  if (slash <= 0) return false;
+  return isCustomProviderKey(modelId.slice(0, slash));
+}
+
+/** Whether a model ID's custom provider speaks the Anthropic protocol. */
+export function isCustomAnthropicModelId(modelId: string): boolean {
+  const slash = modelId.indexOf("/");
+  return slash > 0 && modelId.startsWith("cpa-", 0) && isCustomProviderKey(modelId.slice(0, slash));
+}
+
+const headerNameSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/, "Invalid HTTP header name");
+
+export const customProviderHeaderSchema = z.strictObject({
+  name: headerNameSchema,
+  value: z.string().min(1).max(2048),
+});
+export type CustomProviderHeader = z.infer<typeof customProviderHeaderSchema>;
+
+export const customProviderNameSchema = z.string().min(1).max(100);
+export const customProviderBaseUrlSchema = z
+  .string()
+  .url()
+  .max(2048)
+  .refine((value) => value.startsWith("https://") || value.startsWith("http://"), {
+    message: "Base URL must be an http(s) URL",
+  });
+export const customProviderApiKeySchema = z.string().min(1).max(4096);
+
+export const createCustomProviderRequestSchema = z.strictObject({
+  name: customProviderNameSchema,
+  protocol: customProviderProtocolSchema,
+  baseUrl: customProviderBaseUrlSchema,
+  apiKey: customProviderApiKeySchema,
+  headers: z.array(customProviderHeaderSchema).max(32).optional(),
+});
+export type CreateCustomProviderRequest = z.infer<typeof createCustomProviderRequestSchema>;
+
+export const updateCustomProviderRequestSchema = z.strictObject({
+  name: customProviderNameSchema.optional(),
+  baseUrl: customProviderBaseUrlSchema.optional(),
+  headers: z.array(customProviderHeaderSchema).max(32).optional(),
+  status: z.enum(["active", "disabled"]).optional(),
+  apiKey: customProviderApiKeySchema.optional(),
+});
+export type UpdateCustomProviderRequest = z.infer<typeof updateCustomProviderRequestSchema>;
+
+export const customProviderStatusSchema = z.enum(["active", "disabled"]);
+
+export const customProviderRecordSchema = z.strictObject({
+  id: customProviderIdSchema,
+  name: customProviderNameSchema,
+  protocol: customProviderProtocolSchema,
+  baseUrl: customProviderBaseUrlSchema,
+  headers: z.array(customProviderHeaderSchema),
+  status: customProviderStatusSchema,
+  createdAt: z.number().int().nonnegative(),
+  updatedAt: z.number().int().nonnegative(),
+  createdBy: z.string().nullable(),
+  /** The model-ID provider key (`cpa-xxxxxxxx`); present once models exist. */
+  providerKey: z.string().regex(CUSTOM_PROVIDER_KEY_PATTERN),
+});
+export type CustomProviderRecord = z.infer<typeof customProviderRecordSchema>;
+
+export const customProviderListResponseSchema = z.strictObject({
+  providers: z.array(customProviderRecordSchema),
+});
+
+export const customProviderResponseSchema = z.strictObject({
+  provider: customProviderRecordSchema,
+});
+
+/** One entry of a gateway's synced model list; not persisted until imported. */
+export const syncedCustomProviderModelSchema = z.strictObject({
+  modelId: z.string().min(1).max(200),
+  displayName: z.string().min(1).max(200),
+});
+export type SyncedCustomProviderModel = z.infer<typeof syncedCustomProviderModelSchema>;
+
+export const syncCustomProviderModelsResponseSchema = z.strictObject({
+  models: z.array(syncedCustomProviderModelSchema).max(500),
+});
+
+export const importCustomProviderModelSchema = z.strictObject({
+  modelId: z.string().min(1).max(200),
+  displayName: z.string().min(1).max(200),
+  modalities: z.array(customModelModalitySchema).min(1).max(4),
+  reasoningEfforts: z.array(customModelReasoningEffortSchema).max(6),
+  contextWindowTokens: z.number().int().positive().max(100_000_000),
+  maxOutputTokens: z.number().int().positive().max(10_000_000),
+});
+
+export const importCustomProviderModelsRequestSchema = z.strictObject({
+  models: z.array(importCustomProviderModelSchema).min(1).max(500),
+});
+
+export const updateCustomProviderModelRequestSchema = z.strictObject({
+  displayName: z.string().min(1).max(200).optional(),
+  modalities: z.array(customModelModalitySchema).min(1).max(4).optional(),
+  reasoningEfforts: z.array(customModelReasoningEffortSchema).max(6).optional(),
+  contextWindowTokens: z.number().int().positive().max(100_000_000).optional(),
+  maxOutputTokens: z.number().int().positive().max(10_000_000).optional(),
+  enabled: z.boolean().optional(),
+});
+export type UpdateCustomProviderModelRequest = z.infer<
+  typeof updateCustomProviderModelRequestSchema
+>;
+
+/** A custom provider model as the web catalog serves it. */
+export const customModelRecordSchema = z.strictObject({
+  /** Full selectable model ID: `{providerKey}/{modelId}`. */
+  id: z.string().min(1),
+  providerId: customProviderIdSchema,
+  providerName: customProviderNameSchema,
+  protocol: customProviderProtocolSchema,
+  modelId: z.string().min(1).max(200),
+  displayName: z.string().min(1).max(200),
+  modalities: z.array(customModelModalitySchema),
+  reasoningEfforts: z.array(customModelReasoningEffortSchema),
+  contextWindowTokens: z.number().int().positive(),
+  maxOutputTokens: z.number().int().positive(),
+  enabled: z.boolean(),
+});
+export type CustomModelRecord = z.infer<typeof customModelRecordSchema>;
+
+export const customModelsCatalogResponseSchema = z.strictObject({
+  models: z.array(customModelRecordSchema),
+});
+
+export const customProviderModelRecordSchema = customModelRecordSchema;
+export const customProviderModelsResponseSchema = z.strictObject({
+  models: z.array(
+    customModelRecordSchema.extend({
+      providerId: customProviderIdSchema,
+    })
+  ),
+});

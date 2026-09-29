@@ -14,6 +14,7 @@
 
 import { z } from "zod";
 import { extractProviderAndModel } from "./models";
+import { isCustomProviderKey } from "./types/custom-providers";
 import type {
   ModelProviderSelections,
   ProviderAuthMode,
@@ -24,6 +25,18 @@ export const HARNESS_IDS = ["opencode", "claude"] as const;
 export type HarnessId = (typeof HARNESS_IDS)[number];
 export const DEFAULT_HARNESS: HarnessId = "opencode";
 export const harnessIdSchema = z.enum(HARNESS_IDS);
+
+/**
+ * The model family a provider segment belongs to. Custom-provider keys map
+ * to protocol-scoped families (`cpa-*` → custom-anthropic) so harness
+ * capability checks stay pure without a registry lookup.
+ */
+export function modelFamilyForProvider(provider: string): string {
+  if (isCustomProviderKey(provider)) {
+    return provider.startsWith("cpa-") ? "custom-anthropic" : "custom-openai";
+  }
+  return provider;
+}
 
 export interface HarnessCapabilities {
   /** User-facing name. Never "Claude Code" (branding rule). */
@@ -49,7 +62,7 @@ export const HARNESS_CATALOG = {
   },
   claude: {
     label: "Claude Agent",
-    modelFamilies: ["anthropic"],
+    modelFamilies: ["anthropic", "custom-anthropic"],
     providerAuth: {
       anthropic: ["api_key", "provider_account"],
     },
@@ -80,7 +93,7 @@ export function harnessSupportsModel(harness: HarnessId, model: string): boolean
   const families = getHarnessCapabilities(harness).modelFamilies;
   if (families === "any") return true;
   const { provider } = extractProviderAndModel(model);
-  return families.includes(provider);
+  return families.includes(modelFamilyForProvider(provider));
 }
 
 /**

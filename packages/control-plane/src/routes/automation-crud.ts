@@ -26,7 +26,7 @@ import {
   getValidHarnessOrDefault,
   selectedProviderAuthModes,
 } from "@open-inspect/shared/harnesses";
-import { getValidModelOrDefault, isValidModel } from "@open-inspect/shared/models";
+import { getValidModelOrDefault, isSelectableModelId } from "@open-inspect/shared/models";
 import {
   AutomationStore,
   parseAutomationTriggerFields,
@@ -457,7 +457,7 @@ async function handleUpdateAutomation(
     return error("scheduleTz must be a valid IANA timezone", 400);
   }
 
-  if (body.model !== undefined && !isValidModel(body.model)) {
+  if (body.model !== undefined && !isSelectableModelId(body.model)) {
     return error("Invalid model", 400);
   }
 

@@ -5,7 +5,6 @@ import {
   getReasoningConfig,
   type ModelCategory,
   type ReasoningEffort,
-  type ValidModel,
 } from "@open-inspect/shared/models";
 import {
   HARNESS_IDS,
@@ -32,10 +31,10 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 type ModelReasoningSelectorProps = {
-  selectedModel: ValidModel;
+  selectedModel: string;
   reasoningEffort: ReasoningEffort | undefined;
   items: ModelCategory[];
-  onModelChange: (model: ValidModel) => void;
+  onModelChange: (model: string) => void;
   onReasoningEffortChange: (effort: ReasoningEffort | undefined) => void;
   /** Agent harness shown as the trigger's prefix. */
   harness?: HarnessId;
@@ -256,8 +255,8 @@ function ModelOptions({
   onChange,
 }: {
   items: ModelCategory[];
-  value: ValidModel;
-  onChange: (model: ValidModel) => void;
+  value: string;
+  onChange: (model: string) => void;
 }) {
   return (
     <DropdownMenuRadioGroup

@@ -49,6 +49,13 @@ describe("harnessSupportsModel", () => {
     expect(harnessSupportsModel("claude", "xai/grok-4.6")).toBe(false);
   });
 
+  it("runs Anthropic-protocol custom providers on Claude and rejects OpenAI-protocol ones", () => {
+    expect(harnessSupportsModel("claude", "cpa-00112233/glm-4.7")).toBe(true);
+    expect(harnessSupportsModel("claude", "cpo-00112233/deepseek-v4-pro")).toBe(false);
+    expect(harnessSupportsModel("opencode", "cpa-00112233/glm-4.7")).toBe(true);
+    expect(harnessSupportsModel("opencode", "cpo-00112233/deepseek-v4-pro")).toBe(true);
+  });
+
   it("filters a model list by harness", () => {
     const filtered = filterModelsForHarness("claude", VALID_MODELS);
     expect(filtered.length).toBeGreaterThan(0);

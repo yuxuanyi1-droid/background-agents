@@ -43,6 +43,11 @@ from ..credentials.provider_credential_client import (
     RuntimeCredentialDenied,
     RuntimeCredentialUnavailable,
 )
+from ..custom_providers import (
+    custom_anthropic_env,
+    find_provider_for_model,
+    load_custom_providers,
+)
 from .base import (
     BridgeEvent,
     EventSink,
@@ -54,6 +59,7 @@ from .base import (
 )
 from .claude_env import (
     CLAUDE_POLICY_SETTINGS,
+    ClaudeAuthMode,
     ClaudeCredential,
     bundled_claude_binary,
     harness_env,
@@ -204,13 +210,18 @@ class _TurnState:
 
 
 def bare_model_id(model: str | None, default: str) -> str:
-    """``anthropic/claude-x`` → ``claude-x``; a bare id passes through."""
+    """``anthropic/claude-x`` → ``claude-x``; a bare id passes through.
+
+    Custom Anthropic-protocol providers (``cpa-xxxxxxxx/model``) pass their
+    upstream model id through; the gateway credential is resolved separately
+    (see ``custom_provider_credential``).
+    """
     value = model or default
     if "/" in value:
         provider, _, bare = value.partition("/")
-        if provider != "anthropic":
-            raise ValueError(f"The Claude harness cannot run provider {provider!r}")
-        return bare
+        if provider == "anthropic" or provider.startswith("cpa-"):
+            return bare
+        raise ValueError(f"The Claude harness cannot run provider {provider!r}")
     return value
 
 
@@ -315,6 +326,14 @@ class ClaudeHarness:
         self.session_id: str | None = None
         self.credential: ClaudeCredential | None = None
         self.wrapper_path: Path | None = None
+        # Clean-env wrappers by auth mode, generated on first use: a session
+        # whose default model uses one credential family can still override a
+        # message to a custom-provider model that uses the other.
+        self._wrappers: dict[ClaudeAuthMode, Path] = {}
+        self._custom_providers = load_custom_providers(self.environ)
+        # The full model id of the running turn (``None`` before the first
+        # prompt), so gateway routing sees the provider key prefix.
+        self._active_model_route: str | None = None
         self._client: SdkClient | None = None
         self._client_lifecycle_lock = asyncio.Lock()
         self._connected_model: str | None = None
@@ -341,9 +360,7 @@ class ClaudeHarness:
         """
         self.credential = await self._resolve_credential()
         binary = self._binary or bundled_claude_binary()
-        self.wrapper_path = write_clean_env_wrapper(
-            self.config.config_dir / "bin", mode=self.credential.mode, binary=binary
-        )
+        self.wrapper_path = self._wrapper_for(self.credential.mode, binary)
         if self.config.tools is not None and self._tool_client is None:
             self._tool_client = ControlPlaneToolClient(self.config.tools, self.log)
         self.log.info(
@@ -354,6 +371,18 @@ class ClaudeHarness:
         )
 
     async def _resolve_credential(self) -> ClaudeCredential:
+        # A session whose default model routes to a custom Anthropic-protocol
+        # gateway runs entirely on the gateway's credential; no Anthropic
+        # platform key or connected account is required.
+        resolved = find_provider_for_model(str(self.config.default_model), self._custom_providers)
+        if resolved is not None:
+            provider, _ = resolved
+            if not provider.is_anthropic_protocol:
+                raise HarnessStartError(
+                    "The Claude harness cannot run OpenAI-protocol custom provider "
+                    f"{provider.provider_key!r}."
+                )
+            return ClaudeCredential(ClaudeAuthMode.API_KEY, custom_anthropic_env(provider))
         if self.config.oauth_managed:
             if self.credential_client is None:
                 raise HarnessStartError(
@@ -374,6 +403,37 @@ class ClaudeHarness:
                 "or select a connected Claude account, then start a new session."
             )
         return credential
+
+    def _wrapper_for(self, mode: ClaudeAuthMode, binary: Path | None = None) -> Path:
+        """The clean-env wrapper for a credential mode, generated on first use."""
+        existing = self._wrappers.get(mode)
+        if existing is not None:
+            return existing
+        resolved_binary = binary or self._binary or bundled_claude_binary()
+        wrapper = write_clean_env_wrapper(
+            self.config.config_dir / "bin", mode=mode, binary=resolved_binary
+        )
+        self._wrappers[mode] = wrapper
+        return wrapper
+
+    def _credential_for_model(self, model: str) -> ClaudeCredential:
+        """The credential a turn runs on: a custom gateway's key when the
+        model routes to an Anthropic-protocol custom provider, else the
+        session's own credential resolved at open."""
+        if self.credential is None:
+            raise RuntimeError("Claude harness is not open")
+        route = self._active_model_route
+        resolved = (
+            find_provider_for_model(route, self._custom_providers) if route is not None else None
+        )
+        if resolved is None:
+            return self.credential
+        provider, _ = resolved
+        if not provider.is_anthropic_protocol:
+            raise ValueError(
+                f"The Claude harness cannot run OpenAI-protocol custom provider {provider.provider_key!r}"
+            )
+        return ClaudeCredential(ClaudeAuthMode.API_KEY, custom_anthropic_env(provider))
 
     async def close(self) -> None:
         await self._disconnect()
@@ -401,6 +461,7 @@ class ClaudeHarness:
         """``ClaudeAgentOptions`` from the session's inputs (§5.1 of the design)."""
         if self.credential is None or self.wrapper_path is None or self.session_id is None:
             raise RuntimeError("Claude harness is not open")
+        credential = self._credential_for_model(model)
         mcp_servers: dict[str, Any] = mcp_server_options(self.config.mcp_servers)
         allowed_tools = [*ALLOWED_TOOLS]
         allowed_tools.extend(f"mcp__{name}__*" for name in mcp_servers)
@@ -415,8 +476,8 @@ class ClaudeHarness:
             system_prompt["append"] = self.config.system_prompt_append
         kwargs: dict[str, Any] = {
             "cwd": str(self.config.workdir),
-            "cli_path": str(self.wrapper_path),
-            "env": harness_env(self.config.config_dir, self.credential),
+            "cli_path": str(self._wrapper_for(credential.mode)),
+            "env": harness_env(self.config.config_dir, credential),
             "model": model,
             "mcp_servers": mcp_servers,
             "allowed_tools": allowed_tools,
@@ -505,6 +566,7 @@ class ClaudeHarness:
     async def run_prompt(self, prompt: HarnessPrompt, emit: EventSink) -> TurnOutcome:
         try:
             model = bare_model_id(prompt.model, self.config.default_model)
+            self._active_model_route = prompt.model or str(self.config.default_model)
         except ValueError as error:
             return TurnOutcome.failed(str(error))
         # One budget covers the whole turn: connect, submit, every read and

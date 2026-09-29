@@ -11,6 +11,7 @@ import { SessionIndexStore } from "../db/session-index";
 import { GlobalSecretsStore } from "../db/global-secrets";
 import { RepoSecretsStore } from "../db/repo-secrets";
 import { EnvironmentSecretsStore } from "../db/environment-secrets";
+import { CustomProviderStore } from "../db/custom-providers";
 import {
   auditSecretsMerge,
   mergeSecretSources,
@@ -25,6 +26,7 @@ import {
   type SessionProviderAuthMode,
   type SubscriptionProviderId,
 } from "@open-inspect/shared/types/provider-accounts";
+import { isCustomModelId } from "@open-inspect/shared/types/custom-providers";
 import { ModelProviderAccountStore } from "../db/model-provider-accounts";
 import type { SqlDatabase } from "../db/sql-database";
 import type { Logger } from "../logger";
@@ -33,6 +35,9 @@ import { buildSessionTargetSecretSources } from "./session-target-secrets";
 import type { SessionRepositoryEntry } from "./repository-target";
 import type { SessionCoreRepository } from "./session-core-repository";
 import type { SessionRow } from "./types";
+
+/** Ceiling on the serialized custom-provider manifest handed to a sandbox. */
+const CUSTOM_PROVIDER_MANIFEST_MAX_BYTES = 128 * 1024;
 
 /**
  * Dependencies injected into UserEnvResolver.
@@ -50,6 +55,8 @@ export interface UserEnvResolverDeps {
   durableObjectId: string;
   repoSecretsEncryptionKey: string;
   secretsCapEnforcement: string | undefined;
+  /** Key for provider-account credentials; custom provider keys share it. */
+  providerAccountsEncryptionKey: string | undefined;
   /** The session-scoped logger; the composition root creates it before this class. */
   log: Logger;
 }
@@ -67,6 +74,7 @@ export class UserEnvResolver {
   private readonly resolveRepoId: (session: SessionRow) => Promise<number>;
   private readonly durableObjectId: string;
   private readonly repoSecretsEncryptionKey: string;
+  private readonly providerAccountsEncryptionKey: string | undefined;
   private readonly secretsCapEnforcement: string | undefined;
   private readonly log: Logger;
 
@@ -76,6 +84,7 @@ export class UserEnvResolver {
     this.resolveRepoId = deps.resolveRepoId;
     this.durableObjectId = deps.durableObjectId;
     this.repoSecretsEncryptionKey = deps.repoSecretsEncryptionKey;
+    this.providerAccountsEncryptionKey = deps.providerAccountsEncryptionKey;
     this.secretsCapEnforcement = deps.secretsCapEnforcement;
     this.log = deps.log;
   }
@@ -95,6 +104,7 @@ export class UserEnvResolver {
    * authentication in the assembled environment, or null when authenticated.
    */
   async getProviderAuthenticationError(model: string): Promise<string | null> {
+    if (isCustomModelId(model)) return this.checkCustomModel(model);
     const context = await this.loadUserEnvContext();
     if (!context) return null;
     const accountIssue = await this.checkBoundAccount(model, context);
@@ -138,6 +148,29 @@ export class UserEnvResolver {
       return `The connected ${subscription} account for this session ${state}. Reconnect it in Settings, then start a new session.`;
     }
     return null;
+  }
+
+  /**
+   * A custom-provider model must still resolve against the registry at
+   * prompt time: the provider must exist and be active with a stored key,
+   * and the model must be imported and enabled.
+   */
+  private async checkCustomModel(model: string): Promise<string | null> {
+    const store = this.customProviderStore();
+    const resolved = store ? await store.resolveCustomModel(model) : null;
+    if (!resolved) {
+      this.log.error("custom_model.unresolvable", {
+        event: "custom_model.unresolvable",
+        model,
+      });
+      return `The custom provider model "${model}" is no longer available. Ask an administrator to restore it, then start a new session.`;
+    }
+    return null;
+  }
+
+  private customProviderStore(): CustomProviderStore | null {
+    if (!this.providerAccountsEncryptionKey) return null;
+    return new CustomProviderStore(this.db, this.providerAccountsEncryptionKey);
   }
 
   private async loadUserEnvContext(): Promise<UserEnvContext | null> {
@@ -211,7 +244,37 @@ export class UserEnvResolver {
       brokerSecrets: managedSecrets,
       providerAuthModes,
     });
+    await this.injectCustomProviderEnv(sandboxEnv);
     return { sandboxEnv, providerAuthModes, providerAccountIds };
+  }
+
+  /**
+   * Fold the custom-provider manifest and decrypted keys into the sandbox
+   * env: `OI_CUSTOM_PROVIDERS` carries every active provider's routing and
+   * model metadata (never a key), and one `CP_XXXXXXXX_API_KEY` var carries
+   * each provider's credential. Both harnesses read these; see
+   * sandbox-runtime's opencode_server and claude harness.
+   */
+  private async injectCustomProviderEnv(sandboxEnv: Record<string, string>): Promise<void> {
+    const store = this.customProviderStore();
+    if (!store) return;
+    const entries = await store.getSandboxEntries();
+    if (entries.length === 0) return;
+    const manifest = JSON.stringify(entries);
+    if (manifest.length > CUSTOM_PROVIDER_MANIFEST_MAX_BYTES) {
+      this.log.error("custom_provider.manifest_too_large", {
+        event: "custom_provider.manifest_too_large",
+        bytes: manifest.length,
+        providers: entries.length,
+      });
+      return;
+    }
+    for (const entry of entries) {
+      const apiKey = await store.readApiKey(entry.id);
+      if (apiKey === null) continue;
+      sandboxEnv[entry.apiKeyEnv] = apiKey;
+    }
+    sandboxEnv.CUSTOM_MODEL_PROVIDERS = manifest;
   }
 
   /**

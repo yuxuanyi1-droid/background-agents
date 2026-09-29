@@ -59,7 +59,7 @@ export async function getAvailableModels(env: Env, traceId?: string): Promise<Mo
     traceId
   );
   if (!enabledModels) return getDefaultModelOptions();
-  const enabledSet = new Set<ValidModel>(enabledModels);
+  const enabledSet = new Set<string>(enabledModels);
   return ALL_MODELS.filter((model) => enabledSet.has(model.value));
 }
 

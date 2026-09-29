@@ -114,6 +114,7 @@ const AUDITED_ALLOWED_PERMISSIONS = new Set<PermissionId>([
   "automations.trigger.any",
   "automations.trigger.own",
   "commit_signing.manage",
+  "custom_providers.manage",
   "environments.images.manage",
   "environments.manage",
   "environments.secrets.manage",

@@ -33,7 +33,6 @@ import {
   DEFAULT_MODEL,
   getDefaultReasoningEffort,
   type ReasoningEffort,
-  type ValidModel,
 } from "@open-inspect/shared/models";
 import type { ModelPreference } from "@/lib/model-selection";
 import type { HarnessId } from "@open-inspect/shared/harnesses";
@@ -680,7 +679,7 @@ function useModelSelection(sessionState: SessionState, harness: HarnessId) {
       sessionReasoningEffort,
     ]
   );
-  const handleModelChange = useCallback((model: ValidModel) => {
+  const handleModelChange = useCallback((model: string) => {
     setModelPreferenceDraft({ model, reasoningEffort: getDefaultReasoningEffort(model) });
   }, []);
 

@@ -85,7 +85,9 @@ export class ModelPreferencesStore {
 
       if (result.meta.changes === 1) {
         return {
-          enabledModels: next,
+          // Custom-provider ids never reach this store (validateChanges keeps
+          // it canonical), so the applied set is always catalog models.
+          enabledModels: next as ValidModel[],
           revision: row ? row.revision + 1 : 1,
         };
       }

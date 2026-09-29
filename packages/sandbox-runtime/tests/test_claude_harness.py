@@ -168,7 +168,7 @@ class Harness:
             workdir=tmp_path / "repo",
             config_dir=tmp_path / "claude",
             mcp_servers=overrides.pop("mcp_servers", ()),
-            default_model="claude-sonnet-4-6",
+            default_model=overrides.pop("default_model", "claude-sonnet-4-6"),
             oauth_managed=oauth_managed,
             system_prompt_append=overrides.pop("system_prompt_append", None),
             tools=None,
@@ -267,6 +267,100 @@ class TestOpen:
         h = Harness(tmp_path, oauth_managed=True)
         with pytest.raises(HarnessStartError):
             await h.harness.open()
+
+
+CUSTOM_GATEWAY_MANIFEST = {
+    "id": "0011223344556677889900aabbccddee",
+    "providerKey": "cpa-00112233",
+    "protocol": "anthropic",
+    "baseUrl": "https://gateway.example/api/anthropic",
+    "headers": [{"name": "X-Org", "value": "acme"}],
+    "apiKeyEnv": "CP_00112233_API_KEY",
+    "models": [
+        {
+            "modelId": "glm-4.7",
+            "displayName": "GLM 4.7",
+            "reasoningEfforts": [],
+            "contextWindowTokens": 200_000,
+            "maxOutputTokens": 32_768,
+        }
+    ],
+}
+
+
+class TestCustomProviderRouting:
+    """A model routed to a custom gateway runs on the gateway's credential."""
+
+    def _custom_environ(self) -> dict[str, str]:
+        import json as _json
+
+        return {
+            "PATH": "/bin",
+            "CUSTOM_MODEL_PROVIDERS": _json.dumps([CUSTOM_GATEWAY_MANIFEST]),
+            "CP_00112233_API_KEY": "sk-gateway",
+        }
+
+    @pytest.mark.asyncio
+    async def test_custom_model_prompt_uses_the_gateway_credential(self, tmp_path: Path) -> None:
+        h = Harness(
+            tmp_path,
+            turns=[[_result(0.1)]],
+            environ=self._custom_environ(),
+            default_model="cpa-00112233/glm-4.7",
+        )
+        await h.harness.open()
+        await h.harness.create_session()
+        await _run(
+            h.harness,
+            HarnessPrompt(message_id="m1", text="hi", model="cpa-00112233/glm-4.7"),
+        )
+        options = h.client.options
+        assert options["model"] == "glm-4.7"
+        assert options["env"]["ANTHROPIC_BASE_URL"] == "https://gateway.example/api/anthropic"
+        assert options["env"]["ANTHROPIC_API_KEY"] == "sk-gateway"
+        assert options["env"]["ANTHROPIC_CUSTOM_HEADERS"] == "X-Org: acme"
+
+    @pytest.mark.asyncio
+    async def test_custom_model_on_an_oauth_session_switches_wrapper_mode(
+        self, tmp_path: Path
+    ) -> None:
+        environ = self._custom_environ()
+        h = Harness(
+            tmp_path,
+            turns=[[_result(0.1)]],
+            oauth_managed=True,
+            credential_client=FakeCredentialClient(Issued()),
+            environ=environ,
+        )
+        await h.harness.open()
+        assert h.harness.credential is not None
+        assert h.harness.credential.mode is ClaudeAuthMode.OAUTH_TOKEN
+        assert h.harness.credential.env == {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-secret"}
+        await h.harness.create_session()
+        await _run(
+            h.harness,
+            HarnessPrompt(message_id="m1", text="hi", model="cpa-00112233/glm-4.7"),
+        )
+        options = h.client.options
+        # The API-key-family wrapper: the gateway credential must survive it.
+        assert options["env"]["ANTHROPIC_API_KEY"] == "sk-gateway"
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in options["env"] or (
+            options["env"]["ANTHROPIC_BASE_URL"] == "https://gateway.example/api/anthropic"
+        )
+
+    @pytest.mark.asyncio
+    async def test_catalog_model_keeps_the_session_credential(self, tmp_path: Path) -> None:
+        environ = {**self._custom_environ(), "ANTHROPIC_API_KEY": "sk-ant-key"}
+        h = Harness(tmp_path, turns=[[_result(0.1)]], environ=environ)
+        await h.harness.open()
+        await h.harness.create_session()
+        await _run(
+            h.harness,
+            HarnessPrompt(message_id="m1", text="hi", model="anthropic/claude-sonnet-4-6"),
+        )
+        options = h.client.options
+        assert options["env"]["ANTHROPIC_API_KEY"] == "sk-ant-key"
+        assert "ANTHROPIC_BASE_URL" not in options["env"]
 
 
 class TestSession:
@@ -405,8 +499,13 @@ class TestOptions:
         assert bare_model_id("anthropic/claude-x", "d") == "claude-x"
         assert bare_model_id("claude-x", "d") == "claude-x"
         assert bare_model_id(None, "d") == "d"
-        with pytest.raises(ValueError, match="openai"):
+        with pytest.raises(ValueError, match="cannot run provider"):
             bare_model_id("openai/gpt-5", "d")
+
+    def test_bare_model_ids_pass_custom_anthropic_providers_through(self) -> None:
+        assert bare_model_id("cpa-00112233/glm-4.7", "d") == "glm-4.7"
+        with pytest.raises(ValueError, match="cannot run provider"):
+            bare_model_id("cpo-00112233/deepseek-v4-pro", "d")
 
     def test_mcp_options_skip_disabled_and_empty(self) -> None:
         assert mcp_server_options(({"name": "x", "type": "local", "command": []},)) == {}

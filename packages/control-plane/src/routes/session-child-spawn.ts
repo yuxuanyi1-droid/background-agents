@@ -12,12 +12,13 @@ import {
 import {
   getReasoningConfig,
   getValidModelOrDefault,
-  isValidModel,
+  isSelectableModelId,
   isValidReasoningEffort,
   resolveEnabledModel,
   type ValidModel,
   VALID_MODELS,
 } from "@open-inspect/shared/models";
+import { isCustomModelId } from "@open-inspect/shared/types/custom-providers";
 import { generateId } from "../auth/crypto";
 import { getEffectiveEnabledModels } from "../db/model-preferences";
 import { SessionIndexStore } from "../db/session-index";
@@ -173,11 +174,15 @@ export async function handleSpawnChild(
     });
     return error("Model preferences unavailable", 503);
   }
-  if (body.model !== undefined && !isValidModel(body.model)) {
+  if (body.model !== undefined && !isSelectableModelId(body.model)) {
     return error(`Invalid model "${body.model}". Valid models: ${VALID_MODELS.join(", ")}`, 400);
   }
   const requestedModel = getValidModelOrDefault(body.model ?? spawnContext.model);
-  if (body.model !== undefined && !enabledModels.includes(requestedModel)) {
+  if (
+    body.model !== undefined &&
+    !isCustomModelId(body.model) &&
+    !enabledModels.includes(requestedModel as ValidModel)
+  ) {
     return error(`Model "${body.model}" is not enabled`, 400);
   }
   const model = resolveEnabledModel({ model: requestedModel, enabledModels });

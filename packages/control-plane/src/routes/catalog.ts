@@ -13,6 +13,7 @@ import { autofixRoutes } from "./autofix";
 import { automationRoutes } from "./automations";
 import { browserAuthRoutes } from "./browser-auth";
 import { commitSigningRoutes } from "./commit-signing";
+import { customProviderRoutes } from "./custom-providers";
 import { environmentSecretsRoutes } from "./environment-secrets";
 import { environmentRoutes } from "./environments";
 import { healthRoutes } from "./health";
@@ -66,6 +67,9 @@ export const catalog: readonly RouteModule[] = [
   modelProviderAccountRoutes,
   // Delivery of stored provider secrets to sandboxes (Anthropic)
   providerRuntimeCredentialRoutes,
+
+  // Custom model providers (admin-registered gateways + imported models)
+  customProviderRoutes,
 
   // Integration settings
   integrationSettingsRoutes,

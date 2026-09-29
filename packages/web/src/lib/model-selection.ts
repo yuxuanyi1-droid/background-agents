@@ -4,7 +4,6 @@ import {
   getValidModelOrDefault,
   resolveEnabledModel,
   type ReasoningEffort,
-  type ValidModel,
 } from "@open-inspect/shared/models";
 
 export interface ModelPreference {
@@ -13,7 +12,7 @@ export interface ModelPreference {
 }
 
 export interface ResolvedModelPreference {
-  model: ValidModel;
+  model: string;
   reasoningEffort?: ReasoningEffort;
 }
 
