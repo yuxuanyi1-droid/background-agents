@@ -17,11 +17,18 @@ Session continuity differs by vendor:
 
 from __future__ import annotations
 
+import os
+import tempfile
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..custom_providers import write_codex_model_providers
+from ..custom_providers import (
+    dsh_model_selection_patch,
+    write_codex_model_providers,
+    write_dsh_profile_patch,
+    write_pi_models_json,
+)
 from .base import HarnessId, TurnOutcome
 from .cli_harness import (
     CliTurnState,
@@ -212,7 +219,8 @@ class PiVendor:
         if model:
             argv += ["--model", model]
         if reasoning_effort:
-            argv += ["--thinking", reasoning_effort]
+            # Pi's level for disabling thinking is "off", not the registry's "none".
+            argv += ["--thinking", "off" if reasoning_effort == "none" else reasoning_effort]
         argv += ["--", prompt_text]
         return argv
 
@@ -220,7 +228,13 @@ class PiVendor:
         return {}
 
     def prepare(self, custom_providers: tuple[CustomProvider, ...]) -> None:
-        return None
+        """Register the providers in the Pi CLI's ``models.json``.
+
+        Pi supports every wire protocol a provider can carry, and its model
+        ids are ``{provider}/{model}`` — exactly the selection string the
+        bridge already passes, so no argv routing is needed.
+        """
+        write_pi_models_json(Path.home() / ".pi" / "agent" / "models.json", custom_providers)
 
     def parse_record(self, record: dict[str, Any], state: CliTurnState) -> list[Any]:
         kind = record.get("type")
@@ -348,7 +362,19 @@ class DshVendor:
         workdir: Path,
         model_provider: str | None = None,
     ) -> list[str]:
-        argv = ["--profile", "headless", "--json"]
+        argv = ["--profile", "headless"]
+        if model_provider:
+            # The headless profile has no model flag: the routed model rides a
+            # per-turn --patch overlay of the agent-default-model config, the
+            # same overlay mechanism the provider declaration below uses.
+            bare = _bare_model(model)
+            if bare:
+                selection_path = Path(tempfile.gettempdir()) / "oi-dsh-model-selection.yml"
+                selection_path.write_text(
+                    dsh_model_selection_patch(model_provider, bare, reasoning_effort)
+                )
+                argv += ["--patch", str(selection_path)]
+        argv += ["--json"]
         if session_id:
             argv += ["--session-id", session_id]
         argv.append(prompt_text)
@@ -359,7 +385,16 @@ class DshVendor:
         return {"DSH_MODEL": bare} if bare else {}
 
     def prepare(self, custom_providers: tuple[CustomProvider, ...]) -> None:
-        return None
+        """Declare the providers in the headless profile's user patch layer.
+
+        dsh's LLM stack is pi-ai behind a cordis config overlay, so a route
+        pi-ai has never heard of is fully describable from ``cordis.patch.yml``;
+        the credential ref resolves from the provider's env var.
+        """
+        home = Path(os.environ.get("DSH_HOME") or (Path.home() / ".dsh"))
+        write_dsh_profile_patch(
+            home / "profiles" / "headless" / "cordis.patch.yml", custom_providers
+        )
 
     def parse_record(self, record: dict[str, Any], state: CliTurnState) -> list[Any]:
         session_id = record.get("sessionId")

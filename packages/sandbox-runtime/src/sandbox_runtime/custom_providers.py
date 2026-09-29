@@ -291,3 +291,152 @@ def write_codex_model_providers(config_path: Path, providers: tuple[CustomProvid
     merged += "\n\n".join(section.rstrip("\n") for section in missing) + "\n"
     config_path.write_text(merged)
     return True
+
+
+# --- Pi (models.json) -------------------------------------------------------
+
+
+_PI_API_BY_PROTOCOL = {
+    "anthropic": "anthropic-messages",
+    "openai_compatible": "openai-completions",
+    "openai_responses": "openai-responses",
+}
+
+
+def pi_models_document(providers: tuple[CustomProvider, ...]) -> dict:
+    """The ``~/.pi/agent/models.json`` document registering every provider.
+
+    Pi appends the wire path itself (the Anthropic implementation joins
+    ``/v1/messages``, the OpenAI ones ``/chat/completions``/``/responses``),
+    so the registered ``base_url`` follows the same convention the Codex
+    writer relies on: Anthropic gateways without the version segment, OpenAI
+    gateways with it. The key interpolates from the provider's env var, which
+    the supervisor's environment already carries.
+    """
+    document: dict = {"providers": {}}
+    for provider in providers:
+        api = _PI_API_BY_PROTOCOL.get(provider.protocol)
+        if api is None:
+            continue
+        document["providers"][provider.provider_key] = {
+            "baseUrl": provider.base_url,
+            "api": api,
+            "apiKey": f"${provider.api_key_env}",
+            "models": [{"id": model.model_id} for model in provider.models],
+        }
+    return document
+
+
+def write_pi_models_json(config_path: Path, providers: tuple[CustomProvider, ...]) -> bool:
+    """Merge the custom providers into the Pi CLI's ``models.json``.
+
+    Idempotent: provider keys are upserted, unknown pre-existing providers
+    are preserved, and Pi reloads the file when a model is selected.
+    """
+    document = pi_models_document(providers)
+    if not document["providers"]:
+        return False
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    existing: dict = {}
+    if config_path.exists():
+        try:
+            parsed = json.loads(config_path.read_text())
+            if isinstance(parsed, dict):
+                existing = parsed
+        except ValueError:
+            existing = {}
+    merged_providers = existing.get("providers")
+    providers_out = dict(merged_providers) if isinstance(merged_providers, dict) else {}
+    changed = any(providers_out.get(key) != value for key, value in document["providers"].items())
+    providers_out.update(document["providers"])
+    existing["providers"] = providers_out
+    if not changed:
+        return False
+    config_path.write_text(json.dumps(existing, indent=2) + "\n")
+    return True
+
+
+# --- dsh (cordis profile patch) ----------------------------------------------
+
+
+_DSH_API_BY_PROTOCOL = _PI_API_BY_PROTOCOL
+
+
+def _yaml_scalar(value: str) -> str:
+    return json.dumps(value)
+
+
+def dsh_profile_patch_entries(providers: tuple[CustomProvider, ...]) -> list[str]:
+    """The ``cordis.patch.yml`` entry declaring every provider's route.
+
+    The ``llm-pi-ai`` service's config is a dict keyed by provider route, so
+    one patch entry carries all of them: endpoint, protocol, the credential
+    ref (the provider's env var name, which the credential seam resolves from
+    the environment), and the model catalog with the sizes the registry
+    imported.
+    """
+    if not providers:
+        return []
+    lines = ["- id: llm-pi-ai", "  config:", "    providers:"]
+    for provider in providers:
+        api = _DSH_API_BY_PROTOCOL.get(provider.protocol)
+        if api is None:
+            continue
+        lines.append(f"      {_yaml_scalar(provider.provider_key)}:")
+        lines.append(f"        displayName: {_yaml_scalar(provider.provider_key)}")
+        lines.append(f"        api: {api}")
+        lines.append(f"        baseURL: {_yaml_scalar(provider.base_url)}")
+        lines.append(f"        apiKeyEnv: {_yaml_scalar(provider.api_key_env)}")
+        if provider.models:
+            lines.append("        models:")
+            for model in provider.models:
+                lines.append(f"          - id: {_yaml_scalar(model.model_id)}")
+                lines.append(f"            name: {_yaml_scalar(model.display_name)}")
+                lines.append(f"            contextWindow: {int(model.context_window_tokens)}")
+                lines.append(f"            maxTokens: {int(model.max_output_tokens)}")
+                lines.append("            input: [text]")
+                efforts = [effort for effort in model.reasoning_efforts if effort != "none"]
+                if efforts:
+                    rendered = ", ".join(_yaml_scalar(effort) for effort in efforts)
+                    lines.append(f"            reasoningEfforts: [{rendered}]")
+    return lines if len(lines) > 4 else []
+
+
+def write_dsh_profile_patch(patch_path: Path, providers: tuple[CustomProvider, ...]) -> bool:
+    """Rewrite the headless profile's user patch layer with the providers.
+
+    The patch file belongs to the harness (a fresh sandbox carries only the
+    shipped empty layer), so it is regenerated wholesale on every prepare —
+    unlike the Codex and Pi writers, which merge into files a login flow may
+    also write.
+    """
+    entries = dsh_profile_patch_entries(providers)
+    if not entries:
+        return False
+    patch_path.parent.mkdir(parents=True, exist_ok=True)
+    body = "\n".join(entries) + "\n"
+    if patch_path.exists() and patch_path.read_text() == body:
+        return False
+    patch_path.write_text(body)
+    return True
+
+
+def dsh_model_selection_patch(
+    provider_key: str, model_id: str, reasoning_effort: str | None
+) -> str:
+    """The per-turn ``--patch`` overlay selecting the model on ``dsh``.
+
+    ``agent-default-model`` is the headless profile's only model selector, so
+    each turn's spawn overlays it with the routed provider and model. The
+    effort ids are pi-ai's, where the registry's ``none`` maps to ``off``.
+    """
+    effort = "off" if reasoning_effort == "none" else reasoning_effort
+    lines = [
+        "- id: agent-default-model",
+        "  config:",
+        f"    provider: {_yaml_scalar(provider_key)}",
+        f"    model: {_yaml_scalar(model_id)}",
+    ]
+    if effort:
+        lines.append(f"    reasoningEffort: {_yaml_scalar(effort)}")
+    return "\n".join(lines) + "\n"

@@ -231,3 +231,77 @@ def test_write_codex_model_providers_without_openai_providers_writes_nothing(tmp
     providers = load_custom_providers(manifest_env(anthropic_manifest()))
     assert write_codex_model_providers(config, providers) is False
     assert not config.exists()
+
+
+# --- Pi models.json and dsh profile patch ---
+
+
+def _load_both() -> tuple:
+    env = {}
+    for factory in (anthropic_manifest, openai_manifest):
+        manifest = factory()
+        env[CUSTOM_PROVIDERS_ENV] = json.dumps(
+            [*(json.loads(env.get(CUSTOM_PROVIDERS_ENV, "[]"))), manifest]
+        )
+        env[manifest["apiKeyEnv"]] = "sk-gateway"
+    return load_custom_providers(env)
+
+
+def test_pi_document_covers_every_protocol():
+    from sandbox_runtime.custom_providers import pi_models_document
+
+    document = pi_models_document(_load_both())
+    anthropic = document["providers"]["cpa-00112233"]
+    assert anthropic["api"] == "anthropic-messages"
+    assert anthropic["baseUrl"] == "https://gateway.example/api/anthropic"
+    assert anthropic["apiKey"] == "$CP_00112233_API_KEY"
+    assert [model["id"] for model in anthropic["models"]] == ["glm-4.7"]
+    openai = document["providers"]["cpo-99887766"]
+    assert openai["api"] == "openai-completions"
+
+
+def test_write_pi_models_json_merges_and_is_idempotent(tmp_path: Path):
+    from sandbox_runtime.custom_providers import write_pi_models_json
+
+    config = tmp_path / "models.json"
+    config.write_text(json.dumps({"providers": {"other": {"api": "anthropic-messages"}}}))
+    assert write_pi_models_json(config, _load_both()) is True
+    written = json.loads(config.read_text())
+    assert set(written["providers"]) == {"other", "cpa-00112233", "cpo-99887766"}
+    assert write_pi_models_json(config, _load_both()) is False
+    assert json.loads(config.read_text()) == written
+
+
+def test_dsh_patch_declares_routes_and_selection():
+    from sandbox_runtime.custom_providers import (
+        dsh_model_selection_patch,
+        dsh_profile_patch_entries,
+    )
+
+    entries = dsh_profile_patch_entries(_load_both())
+    text = "\n".join(entries)
+    assert "- id: llm-pi-ai" in text
+    assert '      "cpo-99887766":' in text
+    assert "        api: openai-completions" in text
+    assert "        api: anthropic-messages" in text
+    assert '        apiKeyEnv: "CP_00112233_API_KEY"' in text
+    assert "            contextWindow: 200000" in text
+    assert '            reasoningEfforts: ["high"]' in text
+
+    selection = dsh_model_selection_patch("cpo-99887766", "glm-4.7", "none")
+    assert 'provider: "cpo-99887766"' in selection
+    assert 'model: "glm-4.7"' in selection
+    assert 'reasoningEffort: "off"' in selection
+    assert dsh_model_selection_patch("cpo-99887766", "glm-4.7", None).count("\n") == 4
+
+
+def test_write_dsh_profile_patch_regenerates(tmp_path: Path):
+    from sandbox_runtime.custom_providers import write_dsh_profile_patch
+
+    patch = tmp_path / "cordis.patch.yml"
+    assert write_dsh_profile_patch(patch, _load_both()) is True
+    body = patch.read_text()
+    assert body.startswith("- id: llm-pi-ai\n")
+    assert write_dsh_profile_patch(patch, _load_both()) is False
+    patch.write_text(body + "# trailing edit\n")
+    assert write_dsh_profile_patch(patch, _load_both()) is True
