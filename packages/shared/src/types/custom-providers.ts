@@ -5,14 +5,19 @@
  *
  * Model IDs are namespaced by provider: `cpa-{8hex}/{upstream-model-id}`
  * for Anthropic-protocol gateways and `cpo-{8hex}/{upstream-model-id}` for
- * OpenAI-compatible ones. The 8-hex segment is the first 8 characters of the
- * provider's canonical 32-hex ID, so the provider a model routes to is
- * recoverable from the model ID alone without a catalog lookup.
+ * the two OpenAI wire protocols (chat completions and responses). The 8-hex
+ * segment is the first 8 characters of the provider's canonical 32-hex ID,
+ * so the provider a model routes to is recoverable from the model ID alone
+ * without a catalog lookup.
  */
 
 import { z } from "zod";
 
-export const CUSTOM_PROVIDER_PROTOCOLS = ["anthropic", "openai_compatible"] as const;
+export const CUSTOM_PROVIDER_PROTOCOLS = [
+  "anthropic",
+  "openai_compatible",
+  "openai_responses",
+] as const;
 export type CustomProviderProtocol = (typeof CUSTOM_PROVIDER_PROTOCOLS)[number];
 export const customProviderProtocolSchema = z.enum(CUSTOM_PROVIDER_PROTOCOLS);
 
@@ -20,7 +25,9 @@ export const customProviderProtocolSchema = z.enum(CUSTOM_PROVIDER_PROTOCOLS);
 export const CUSTOM_PROVIDER_ID_PATTERN = /^[0-9a-f]{32}$/;
 export const customProviderIdSchema = z.string().regex(CUSTOM_PROVIDER_ID_PATTERN);
 
-/** Short provider key embedded in model IDs: `cpa`/`cpo` plus 8 hex chars. */
+/** Short provider key embedded in model IDs: `cpa`/`cpo` plus 8 hex chars.
+ * Both OpenAI wire protocols share the `cpo` prefix: the protocol field (not
+ * the key) tells chat completions and responses apart at routing time. */
 export const CUSTOM_PROVIDER_KEY_PATTERN = /^cp[ao]-[0-9a-f]{8}$/;
 
 export const CUSTOM_MODEL_MODALITIES = ["text", "image", "video", "audio"] as const;

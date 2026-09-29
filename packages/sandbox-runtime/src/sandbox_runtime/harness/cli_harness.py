@@ -27,6 +27,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from ..custom_providers import find_provider_for_model, load_custom_providers
 from .base import (
     BridgeEvent,
     EventSink,
@@ -40,6 +41,7 @@ from .base import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from ..custom_providers import CustomProvider
     from ..log_config import StructuredLogger
 
 STDERR_TAIL_CHARS = 2000
@@ -160,8 +162,11 @@ class CliVendor(Protocol):
         model: str | None,
         reasoning_effort: str | None,
         workdir: Path,
+        model_provider: str | None = None,
     ) -> list[str]:
-        """Arguments after the binary name for one turn."""
+        """Arguments after the binary name for one turn. ``model_provider`` is
+        the custom-provider key a ``{key}/{model}`` selection routed to, for
+        vendors whose CLI selects a gateway by name (Codex)."""
         ...
 
     def parse_record(self, record: dict[str, Any], state: CliTurnState) -> list[BridgeEvent]:
@@ -170,6 +175,11 @@ class CliVendor(Protocol):
 
     def extra_env(self, *, model: str | None) -> dict[str, str]:
         """Environment overrides for the child (e.g. a vendor's model selector)."""
+        ...
+
+    def prepare(self, custom_providers: tuple[CustomProvider, ...]) -> None:
+        """Register custom providers in the vendor's on-disk config, if it
+        consumes them. Called once at harness open."""
         ...
 
     def exit_outcome(
@@ -207,6 +217,7 @@ class CliHarness:
         self.session_id: str | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._abort_requested = False
+        self._custom_providers: tuple[CustomProvider, ...] = ()
 
     @property
     def id(self) -> HarnessId:
@@ -217,6 +228,8 @@ class CliHarness:
             raise HarnessStartError(
                 f"The {self.vendor.binary} CLI is not installed in this sandbox."
             )
+        self._custom_providers = load_custom_providers(os.environ)
+        self.vendor.prepare(self._custom_providers)
 
     async def close(self) -> None:
         if self._process is not None:
@@ -251,6 +264,9 @@ class CliHarness:
             if prompt.max_duration_seconds is not None
             else self.limits.prompt_max_duration_seconds
         )
+        resolved = (
+            find_provider_for_model(prompt.model, self._custom_providers) if prompt.model else None
+        )
         argv = [
             self.vendor.binary,
             *self.vendor.build_argv(
@@ -259,6 +275,7 @@ class CliHarness:
                 model=prompt.model,
                 reasoning_effort=prompt.reasoning_effort,
                 workdir=self.workdir,
+                model_provider=resolved[0].provider_key if resolved else None,
             ),
         ]
         try:

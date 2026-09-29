@@ -28,7 +28,8 @@ import { Switch } from "@/components/ui/switch";
 
 const PROTOCOL_LABELS: Record<CustomProviderProtocol, string> = {
   anthropic: "Anthropic Messages API",
-  openai_compatible: "OpenAI-compatible",
+  openai_compatible: "OpenAI-compatible (chat completions)",
+  openai_responses: "OpenAI Responses API",
 };
 
 interface ImportedModelDraft {
@@ -588,8 +589,9 @@ export function CustomProvidersSettings() {
         <div>
           <h2 className="text-xl font-semibold text-foreground mb-1">Custom Providers</h2>
           <p className="text-sm text-muted-foreground">
-            Register Anthropic- or OpenAI-compatible gateways. Imported models appear in the model
-            picker and run on both harnesses (Anthropic-protocol models only on Claude Agent).
+            Register Anthropic-, OpenAI-compatible, or OpenAI Responses gateways. Imported models
+            appear in the model picker and run on both harnesses (Anthropic-protocol models only on
+            Claude Agent; OpenAI-protocol models also on Codex).
           </p>
         </div>
         <Button

@@ -1,7 +1,9 @@
 """Vendor argv and stdout-record translation for the CLI harnesses."""
 
+import json
 from pathlib import Path
 
+from sandbox_runtime.custom_providers import load_custom_providers
 from sandbox_runtime.harness.base import HarnessId, TurnOutcome
 from sandbox_runtime.harness.cli_harness import CliTurnState
 from sandbox_runtime.harness.cli_vendors import (
@@ -57,6 +59,51 @@ class TestCodex:
             workdir=WORKDIR,
         )
         assert resume[:3] == ["exec", "resume", "thread-1"]
+
+    def test_model_provider_selects_the_custom_gateway(self) -> None:
+        vendor = CodexVendor()
+        argv = vendor.build_argv(
+            session_id=None,
+            prompt_text="do it",
+            model="cpo-55443322/gpt-x",
+            reasoning_effort=None,
+            workdir=WORKDIR,
+            model_provider="cpo-55443322",
+        )
+        assert argv[argv.index("-c") + 1] == "model_provider=cpo-55443322"
+        assert argv[argv.index("--model") + 1] == "gpt-x"
+
+    def test_prepare_writes_openai_protocol_gates_into_codex_config(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        manifest = {
+            "id": "554433221100ffeeddccbbaa99887766",
+            "providerKey": "cpo-55443322",
+            "protocol": "openai_responses",
+            "baseUrl": "https://responses-gateway.example/v1",
+            "headers": [],
+            "apiKeyEnv": "CP_55443322_API_KEY",
+            "models": [
+                {
+                    "modelId": "gpt-x",
+                    "displayName": "GPT X",
+                    "reasoningEfforts": [],
+                    "contextWindowTokens": 400_000,
+                    "maxOutputTokens": 65_536,
+                }
+            ],
+        }
+        monkeypatch.setenv("CUSTOM_MODEL_PROVIDERS", json.dumps([manifest]))
+        monkeypatch.setenv("CP_55443322_API_KEY", "sk-r")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+
+        CodexVendor().prepare(load_custom_providers())
+
+        config = (tmp_path / ".codex" / "config.toml").read_text()
+        assert "[model_providers.cpo-55443322]" in config
+        assert 'wire_api = "responses"' in config
+        assert "sk-r" not in config
 
     def test_translates_thread_items_and_completion(self) -> None:
         vendor = CodexVendor()

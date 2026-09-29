@@ -14,6 +14,7 @@ import { generateId } from "../auth/crypto";
 import {
   CUSTOM_PROVIDER_ID_PATTERN,
   customProviderKey,
+  customProviderProtocolSchema,
   isCustomModelId,
   type CustomModelModality,
   type CustomModelRecord,
@@ -30,7 +31,7 @@ const CREDENTIAL_SCHEMA_VERSION = 1;
 const providerRowSchema = z.object({
   id: z.string().regex(CUSTOM_PROVIDER_ID_PATTERN),
   name: z.string().min(1).max(100),
-  protocol: z.enum(["anthropic", "openai_compatible"]),
+  protocol: customProviderProtocolSchema,
   base_url: z.string().min(1),
   custom_headers: z.string(),
   status: z.enum(["active", "disabled"]),

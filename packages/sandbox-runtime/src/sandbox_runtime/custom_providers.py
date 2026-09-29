@@ -5,12 +5,15 @@ manifest (every active provider's routing and model metadata) plus one
 ``CP_XXXXXXXX_API_KEY`` variable per provider carrying its decrypted key.
 Keys never appear inside the manifest.
 
-Two consumers:
+Three consumers:
 
 - OpenCode server setup builds provider config blocks (``opencode_server``)
 - The Claude harness resolves an Anthropic-protocol provider for a model ID
   and derives the child's ``ANTHROPIC_*`` credential environment
   (``harness.claude``)
+- The Codex harness resolves an OpenAI-protocol provider for a model ID and
+  writes a ``[model_providers.*]`` entry into the CLI's ``config.toml``
+  (``harness.cli_vendors``)
 """
 
 from __future__ import annotations
@@ -22,10 +25,13 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
 
 CUSTOM_PROVIDERS_ENV = "CUSTOM_MODEL_PROVIDERS"
 _ANTHROPIC_PROTOCOL = "anthropic"
 _OPENAI_COMPATIBLE_PROTOCOL = "openai_compatible"
+_OPENAI_RESPONSES_PROTOCOL = "openai_responses"
+_OPENAI_PROTOCOLS = (_OPENAI_COMPATIBLE_PROTOCOL, _OPENAI_RESPONSES_PROTOCOL)
 
 # Env the Claude child receives in custom-provider mode, on top of the
 # standard API-key family. ANTHROPIC_CUSTOM_HEADERS is the Claude CLI's
@@ -49,11 +55,16 @@ class CustomProvider:
     base_url: str
     headers: tuple[tuple[str, str], ...]
     api_key: str
+    api_key_env: str
     models: tuple[CustomModelEntry, ...]
 
     @property
     def is_anthropic_protocol(self) -> bool:
         return self.protocol == _ANTHROPIC_PROTOCOL
+
+    @property
+    def is_openai_protocol(self) -> bool:
+        return self.protocol in _OPENAI_PROTOCOLS
 
 
 def _parse_model(entry: Mapping[str, Any]) -> CustomModelEntry | None:
@@ -88,12 +99,12 @@ def _parse_provider(entry: Mapping[str, Any], environ: Mapping[str, str]) -> Cus
     api_key_env = entry.get("apiKeyEnv")
     if not isinstance(provider_key, str) or not provider_key:
         return None
-    if protocol not in (_ANTHROPIC_PROTOCOL, _OPENAI_COMPATIBLE_PROTOCOL):
+    if protocol not in (_ANTHROPIC_PROTOCOL, *_OPENAI_PROTOCOLS):
         return None
     if not isinstance(base_url, str) or not base_url:
         return None
     api_key = environ.get(api_key_env) if isinstance(api_key_env, str) else None
-    if not api_key:
+    if not api_key or not isinstance(api_key_env, str):
         return None
     raw_headers = entry.get("headers")
     headers: tuple[tuple[str, str], ...] = tuple(
@@ -121,6 +132,7 @@ def _parse_provider(entry: Mapping[str, Any], environ: Mapping[str, str]) -> Cus
         base_url=base_url,
         headers=headers,
         api_key=api_key,
+        api_key_env=api_key_env,
         models=models,
     )
 
@@ -216,3 +228,66 @@ def custom_anthropic_env(provider: CustomProvider) -> dict[str, str]:
             f"{name}: {value}" for name, value in provider.headers
         )
     return env
+
+
+def codex_wire_api(provider: CustomProvider) -> str:
+    """The Codex CLI ``wire_api`` value for an OpenAI-protocol provider."""
+    if not provider.is_openai_protocol:
+        raise ValueError(f"Codex cannot run Anthropic-protocol provider {provider.provider_key!r}")
+    return "responses" if provider.protocol == _OPENAI_RESPONSES_PROTOCOL else "chat"
+
+
+def _toml_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def codex_model_provider_entries(providers: tuple[CustomProvider, ...]) -> str:
+    """``[model_providers.*]`` TOML sections for the OpenAI-protocol providers.
+
+    Codex appends the wire path itself (``/responses`` or ``/chat/completions``)
+    to ``base_url``, which gateways document WITH the version segment — the
+    opposite convention of Claude Code — so the registered URL passes through
+    unchanged. The key never rides the file: the CLI reads it from ``env_key``,
+    a variable the supervisor's environment already carries.
+    """
+    sections: list[str] = []
+    for provider in providers:
+        if not provider.is_openai_protocol:
+            continue
+        sections.append(
+            f"[model_providers.{provider.provider_key}]\n"
+            f'name = "{_toml_escape(provider.provider_key)}"\n'
+            f'base_url = "{_toml_escape(provider.base_url)}"\n'
+            f'env_key = "{_toml_escape(provider.api_key_env)}"\n'
+            f'wire_api = "{codex_wire_api(provider)}"\n'
+        )
+    return "\n".join(sections)
+
+
+def write_codex_model_providers(config_path: Path, providers: tuple[CustomProvider, ...]) -> bool:
+    """Merge the custom-provider sections into the Codex CLI's ``config.toml``.
+
+    Idempotent: a section already present (a resumed session re-opening the
+    harness) is left untouched, and unknown pre-existing content is preserved
+    verbatim. Returns whether anything was written.
+    """
+    entries = codex_model_provider_entries(providers)
+    if not entries:
+        return False
+    sections = [section for section in entries.split("\n\n") if section.strip()]
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = config_path.read_text() if config_path.exists() else ""
+    present = {
+        line.strip()
+        for line in existing.splitlines()
+        if line.strip().startswith("[model_providers.")
+    }
+    missing = [section for section in sections if section.splitlines()[0].strip() not in present]
+    if not missing:
+        return False
+    merged = existing.rstrip("\n")
+    if merged:
+        merged += "\n\n"
+    merged += "\n\n".join(section.rstrip("\n") for section in missing) + "\n"
+    config_path.write_text(merged)
+    return True

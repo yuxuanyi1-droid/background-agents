@@ -28,8 +28,10 @@ export const harnessIdSchema = z.enum(HARNESS_IDS);
 
 /**
  * The model family a provider segment belongs to. Custom-provider keys map
- * to protocol-scoped families (`cpa-*` → custom-anthropic) so harness
- * capability checks stay pure without a registry lookup.
+ * to protocol-scoped families (`cpa-*` → custom-anthropic, `cpo-*` →
+ * custom-openai) so harness capability checks stay pure without a registry
+ * lookup. Both OpenAI wire protocols (chat completions and responses) share
+ * `custom-openai`; the protocol field distinguishes them at routing time.
  */
 export function modelFamilyForProvider(provider: string): string {
   if (isCustomProviderKey(provider)) {
@@ -70,7 +72,7 @@ export const HARNESS_CATALOG = {
   },
   codex: {
     label: "Codex",
-    modelFamilies: ["openai"],
+    modelFamilies: ["openai", "custom-openai"],
     providerAuth: {
       openai: ["api_key"],
     },

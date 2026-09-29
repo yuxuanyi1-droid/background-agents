@@ -72,6 +72,12 @@ describe("harnessSupportsModel", () => {
     expect(harnessSupportsModel("opencode", "cpo-00112233/deepseek-v4-pro")).toBe(true);
   });
 
+  it("runs OpenAI-protocol custom providers on Codex; both wire protocols share one family", () => {
+    expect(harnessSupportsModel("codex", "cpo-00112233/gpt-x")).toBe(true);
+    expect(harnessSupportsModel("codex", "cpa-00112233/glm-4.7")).toBe(false);
+    expect(harnessSupportsModel("codex", "anthropic/claude-sonnet-4-6")).toBe(false);
+  });
+
   it("filters a model list by harness", () => {
     const filtered = filterModelsForHarness("claude", VALID_MODELS);
     expect(filtered.length).toBeGreaterThan(0);

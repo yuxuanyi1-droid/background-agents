@@ -18,8 +18,10 @@ Session continuity differs by vendor:
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..custom_providers import write_codex_model_providers
 from .base import HarnessId, TurnOutcome
 from .cli_harness import (
     CliTurnState,
@@ -31,7 +33,7 @@ from .cli_harness import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from ..custom_providers import CustomProvider
 
 
 def _bare_model(model: str | None) -> str | None:
@@ -70,6 +72,7 @@ class CodexVendor:
         model: str | None,
         reasoning_effort: str | None,
         workdir: Path,
+        model_provider: str | None = None,
     ) -> list[str]:
         argv = ["exec"]
         if session_id:
@@ -81,6 +84,8 @@ class CodexVendor:
             "--cd",
             str(workdir),
         ]
+        if model_provider:
+            argv += ["-c", f"model_provider={model_provider}"]
         bare = _bare_model(model)
         if bare:
             argv += ["--model", bare]
@@ -91,6 +96,10 @@ class CodexVendor:
 
     def extra_env(self, *, model: str | None) -> dict[str, str]:
         return {}
+
+    def prepare(self, custom_providers: tuple[CustomProvider, ...]) -> None:
+        """Register OpenAI-protocol gateways in the CLI's ``config.toml``."""
+        write_codex_model_providers(Path.home() / ".codex" / "config.toml", custom_providers)
 
     def parse_record(self, record: dict[str, Any], state: CliTurnState) -> list[Any]:
         kind = record.get("type")
@@ -195,6 +204,7 @@ class PiVendor:
         model: str | None,
         reasoning_effort: str | None,
         workdir: Path,
+        model_provider: str | None = None,
     ) -> list[str]:
         argv = ["--mode", "json", "--approve"]
         if session_id:
@@ -208,6 +218,9 @@ class PiVendor:
 
     def extra_env(self, *, model: str | None) -> dict[str, str]:
         return {}
+
+    def prepare(self, custom_providers: tuple[CustomProvider, ...]) -> None:
+        return None
 
     def parse_record(self, record: dict[str, Any], state: CliTurnState) -> list[Any]:
         kind = record.get("type")
@@ -333,6 +346,7 @@ class DshVendor:
         model: str | None,
         reasoning_effort: str | None,
         workdir: Path,
+        model_provider: str | None = None,
     ) -> list[str]:
         argv = ["--profile", "headless", "--json"]
         if session_id:
@@ -343,6 +357,9 @@ class DshVendor:
     def extra_env(self, *, model: str | None) -> dict[str, str]:
         bare = _bare_model(model)
         return {"DSH_MODEL": bare} if bare else {}
+
+    def prepare(self, custom_providers: tuple[CustomProvider, ...]) -> None:
+        return None
 
     def parse_record(self, record: dict[str, Any], state: CliTurnState) -> list[Any]:
         session_id = record.get("sessionId")
@@ -419,6 +436,7 @@ class ZcodeVendor:
         model: str | None,
         reasoning_effort: str | None,
         workdir: Path,
+        model_provider: str | None = None,
     ) -> list[str]:
         argv = ["--prompt", prompt_text]
         if session_id:
@@ -427,6 +445,9 @@ class ZcodeVendor:
 
     def extra_env(self, *, model: str | None) -> dict[str, str]:
         return {}
+
+    def prepare(self, custom_providers: tuple[CustomProvider, ...]) -> None:
+        return None
 
     def parse_record(self, record: dict[str, Any], state: CliTurnState) -> list[Any]:
         return []

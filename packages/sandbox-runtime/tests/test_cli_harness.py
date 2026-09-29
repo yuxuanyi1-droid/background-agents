@@ -43,6 +43,9 @@ class _ScriptedVendor:
     def extra_env(self, *, model: str | None) -> dict[str, str]:
         return {"EXTRA_MARKER": model or ""}
 
+    def prepare(self, custom_providers: tuple[Any, ...]) -> None:
+        return None
+
     def parse_record(self, record: dict[str, Any], state: CliTurnState) -> list[dict[str, Any]]:
         if record.get("type") == "text":
             return append_text_events(state, str(record["delta"]))
