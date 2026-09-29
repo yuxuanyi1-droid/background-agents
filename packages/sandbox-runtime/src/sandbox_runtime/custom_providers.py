@@ -197,9 +197,18 @@ def opencode_provider_config(providers: tuple[CustomProvider, ...]) -> dict[str,
 
 
 def custom_anthropic_env(provider: CustomProvider) -> dict[str, str]:
-    """The Anthropic credential env a Claude child needs for a custom gateway."""
+    """The Anthropic credential env a Claude child needs for a custom gateway.
+
+    Claude Code appends ``/v1/messages`` itself, so a base URL registered with
+    a trailing ``/v1`` (the SDK-style form gateways also document for their
+    model-list endpoints) would be requested at ``/v1/v1/messages``. Strip the
+    version segment so both registration styles reach the gateway.
+    """
+    base_url = provider.base_url.rstrip("/")
+    if base_url.endswith("/v1"):
+        base_url = base_url[: -len("/v1")].rstrip("/")
     env = {
-        "ANTHROPIC_BASE_URL": provider.base_url,
+        "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_API_KEY": provider.api_key,
     }
     if provider.headers:

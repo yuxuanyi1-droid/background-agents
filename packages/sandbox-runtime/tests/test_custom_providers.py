@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from sandbox_runtime.custom_providers import (
     CUSTOM_PROVIDERS_ENV,
     custom_anthropic_env,
@@ -110,3 +112,19 @@ def test_custom_anthropic_env_carries_gateway_credential():
     assert env["ANTHROPIC_BASE_URL"] == "https://gateway.example/api/anthropic"
     assert env["ANTHROPIC_API_KEY"] == "sk-gateway"
     assert env["ANTHROPIC_CUSTOM_HEADERS"] == "X-Org: acme"
+
+
+@pytest.mark.parametrize(
+    "registered,expected",
+    [
+        ("https://gateway.example/api/anthropic/", "https://gateway.example/api/anthropic"),
+        ("https://gateway.example/api/anthropic/v1", "https://gateway.example/api/anthropic"),
+        ("https://gateway.example/api/anthropic/v1/", "https://gateway.example/api/anthropic"),
+        ("https://gateway.example/v1", "https://gateway.example"),
+    ],
+)
+def test_custom_anthropic_env_strips_version_segment(registered: str, expected: str):
+    manifest = anthropic_manifest()
+    manifest["baseUrl"] = registered
+    providers = load_custom_providers(manifest_env(manifest))
+    assert custom_anthropic_env(providers[0])["ANTHROPIC_BASE_URL"] == expected
