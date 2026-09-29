@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..claude_stager import ClaudeHarnessHandoff
+from ..cli_stager import CliHarnessHandoff
 from ..credentials.provider_credential_client import RuntimeCredentialClient
 from .base import (
     DEFAULT_HARNESS_ID,
@@ -25,6 +26,8 @@ from .base import (
 from .claude import ClaudeHarness, ClaudeHarnessConfig
 from .claude_env import OAUTH_MANAGED_ENV_VAR
 from .claude_tools import ToolServerConfig
+from .cli_harness import CliHarness
+from .cli_vendors import get_cli_vendor
 from .opencode import OpencodeHarness
 from .opencode_client import OpenCodeClient
 
@@ -103,6 +106,18 @@ def build_agent_harness(
                 log=log,
                 limits=limits,
                 credential_client=credential_client,
+            )
+        case HarnessId.CODEX | HarnessId.PI | HarnessId.DSH | HarnessId.ZCODE:
+            cli_handoff = CliHarnessHandoff.read()
+            vendor = get_cli_vendor(harness_id)
+            if vendor is None:
+                raise ValueError(f"Unsupported harness: {harness_id}")
+            return CliHarness(
+                vendor=vendor,
+                log=log,
+                limits=limits,
+                workdir=cli_handoff.workdir,
+                has_repository=cli_handoff.has_repository,
             )
     raise ValueError(f"Unsupported harness: {harness_id}")
 

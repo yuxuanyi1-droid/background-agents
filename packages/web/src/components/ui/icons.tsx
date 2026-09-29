@@ -291,6 +291,54 @@ export function OpenCodeIcon({ className, ...props }: IconProps) {
   );
 }
 
+export function DeepSeekIcon({ className, ...props }: IconProps) {
+  return (
+    <svg
+      role="img"
+      className={className}
+      viewBox="0 0 24 24"
+      xmlns="http://www.w3.org/2000/svg"
+      fill="currentColor"
+      {...props}
+    >
+      <title>DeepSeek</title>
+      <path d="M4 5h7c5 0 9 3 9 7s-4 7-9 7H4V5Zm3 3v8h4c3 0 6-1.6 6-4s-3-4-6-4H7Z" />
+    </svg>
+  );
+}
+
+export function PiIcon({ className, ...props }: IconProps) {
+  return (
+    <svg
+      role="img"
+      className={className}
+      viewBox="0 0 24 24"
+      xmlns="http://www.w3.org/2000/svg"
+      fill="currentColor"
+      {...props}
+    >
+      <title>Pi</title>
+      <path d="M5 5H19V8.2H17V18H14V8.2H10V18H7V8.2H5Z" />
+    </svg>
+  );
+}
+
+export function ZaiIcon({ className, ...props }: IconProps) {
+  return (
+    <svg
+      role="img"
+      className={className}
+      viewBox="0 0 24 24"
+      xmlns="http://www.w3.org/2000/svg"
+      fill="currentColor"
+      {...props}
+    >
+      <title>Z.ai</title>
+      <path d="M5 5H19V7.4L10.6 16.6H19V19H5V16.6L13.4 7.4H5Z" />
+    </svg>
+  );
+}
+
 export function SlackIcon({ className }: IconProps) {
   return (
     <svg

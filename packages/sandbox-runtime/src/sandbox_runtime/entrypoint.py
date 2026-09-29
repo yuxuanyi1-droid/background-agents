@@ -7,12 +7,14 @@ import argparse
 import asyncio
 import os
 import signal
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .agent_bridge_process import AgentBridgeProcess
 from .boot_events import BootEventLog
 from .browser_desktop import BrowserDesktop
 from .claude_stager import ClaudeStager, isolated_claude_config_dir, resolve_claude_config_dir
+from .cli_stager import CliStager
 from .code_server import CodeServer
 from .constants import VNC_DISPLAY, VNC_PASSWORD_ENV_VAR
 from .docker_service import DockerService
@@ -38,7 +40,6 @@ from .web_terminal import WebTerminal
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from pathlib import Path
 
     from .repo_config import RepoEntry
 
@@ -63,6 +64,8 @@ def build_harness_process(
             )
         case HarnessId.CLAUDE:
             return ClaudeStager(config.claude_stager_config(), log, config_dir=claude_config_dir)
+        case HarnessId.CODEX | HarnessId.PI | HarnessId.DSH | HarnessId.ZCODE:
+            return CliStager(config.cli_stager_config(), log)
     raise ValueError(f"Unsupported harness: {config.harness}")
 
 
@@ -90,6 +93,14 @@ def managed_skills_destination(harness: HarnessId, claude_config_dir: Path | Non
             if claude_config_dir is None:
                 raise ValueError("Claude sessions need a config dir decided")
             return claude_config_dir / "skills"
+        case HarnessId.CODEX:
+            return Path.home() / ".codex" / "skills"
+        case HarnessId.PI:
+            return Path.home() / ".pi" / "agent" / "skills"
+        case HarnessId.DSH:
+            return Path.home() / ".dsh" / "skills"
+        case HarnessId.ZCODE:
+            return Path.home() / ".zcode" / "skills"
     raise ValueError(f"Unsupported harness: {harness}")
 
 

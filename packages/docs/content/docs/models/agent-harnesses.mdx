@@ -1,10 +1,10 @@
 ---
-title: "Agent harnesses: OpenCode and Claude Agent"
-description: Compare the two agent harnesses, choose one when you create a session, and learn how Claude Agent sessions authenticate and run.
+title: "Agent harnesses: OpenCode, Claude Agent, and the CLI harnesses"
+description: Compare the agent harnesses, choose one when you create a session, and learn how each harness authenticates and runs.
 audience: team-owner
 owner: platform
 status: published
-lastReviewed: "2026-09-23"
+lastReviewed: "2026-09-29"
 relatedCode:
   - packages/shared/src/harnesses.ts
   - docs/CLAUDE_AGENT.md
@@ -13,7 +13,7 @@ relatedCode:
   - packages/web/src/components/provider-auth-controls.tsx
 ---
 
-This page explains what an agent harness is, how OpenCode and Claude Agent differ, and what to expect from a Claude Agent session.
+This page explains what an agent harness is, how the harnesses differ, and what to expect from each one.
 
 ## One harness per session
 
@@ -24,19 +24,16 @@ The agent harness is the coding agent that runs inside the sandbox. Every sessio
 - Sessions started by Slack, GitHub, and Linear run on OpenCode.
 - OpenCode is the default harness.
 
-Both harnesses emit the same session events (tokens, tool calls, steps, warnings), so the session page, timeline, and diff work the same way on either one.
+Every harness emits the same session events (tokens, tool calls, steps, warnings), so the session page, timeline, and diff work the same way on any of them.
 
 ## Comparison
 
-|                                | OpenCode                                                             | Claude Agent                                                                                         |
-| ------------------------------ | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| Models                         | Every model in the catalog                                           | Anthropic models only                                                                                |
-| Anthropic authentication       | `ANTHROPIC_API_KEY` only                                             | `ANTHROPIC_API_KEY` or a connected Claude account                                                    |
-| OpenAI and xAI authentication  | API key or a connected account                                       | Not applicable (cannot run those models)                                                             |
-| Repository instruction files   | The repository's `.opencode/` directory and `.openinspect/setup.sh`  | Reads the repository's `CLAUDE.md` natively; loads `.claude/` settings, hooks, and agents            |
-| Sub-agents                     | The `task` tool; the timeline groups a sub-agent's activity under it | The `Agent` tool; returns only when the sub-agent has finished, grouped in the timeline the same way |
-| Follow-up prompts              | Queue until the running turn completes                               | Queue until the running turn completes                                                               |
-| Resume after a sandbox restore | By session id                                                        | By session id                                                                                        |
+|                                | OpenCode                                            | Claude Agent                                      | Codex                               | Pi                             | DeepSeek Harness                       | ZCode                                                    |
+| ------------------------------ | --------------------------------------------------- | ------------------------------------------------- | ----------------------------------- | ------------------------------ | -------------------------------------- | -------------------------------------------------------- |
+| Models                         | Every model in the catalog                          | Anthropic models only                             | OpenAI models only                  | Every model in the catalog     | DeepSeek models only                   | Z.AI Coding Plan models only                             |
+| Authentication                 | API keys, or a connected account for OpenAI and xAI | `ANTHROPIC_API_KEY` or a connected Claude account | `OPENAI_API_KEY`                    | Provider API keys              | `DEEPSEEK_API_KEY`                     | ZCode credential store (no API-key environment variable) |
+| Resume after a sandbox restore | By session id                                       | By session id                                     | By session id (`codex exec resume`) | By session id (`--session-id`) | By session id (`--session-id`)         | Not wired yet (the CLI supports `--resume`)              |
+| Bundled in the sandbox image   | Yes                                                 | Yes                                               | Yes                                 | Yes                            | Yes, at the pinned official prerelease | Yes, built from the pinned source tarball                |
 
 <Callout type="info" title="Installation default Anthropic account">
   A default Claude account set under Settings › Accounts (provider accounts) takes effect only on
@@ -48,13 +45,31 @@ Both harnesses emit the same session events (tokens, tool calls, steps, warnings
 ## Choose a harness in the composer
 
 1. Open the model control in the new-session composer. It reads `<harness>: <model> <effort>`.
-2. Choose **Agent**, then **OpenCode** or **Claude Agent**. Your last choice is remembered for the next new session.
-3. Choose **Model**. The list is filtered to enabled models the chosen harness can run. If none of the enabled models can run on the harness, the composer says `No enabled models can run on Claude Agent.` and blocks submission until you enable one or switch harness.
+2. Choose **Agent**, then the harness. Your last choice is remembered for the next new session.
+3. Choose **Model**. The list is filtered to enabled models the chosen harness can run. If none of the enabled models can run on the harness, the composer says so and blocks submission until you enable one or switch harness.
 4. Choose **Effort** if the model supports it, then send your prompt.
 
 Switching harness drops any provider authentication pin the new harness cannot honor (for example a connected Claude account selected for a session you then switch to OpenCode), so you never submit a selection the server would refuse.
 
 Once the session exists, the **Agent** row disappears. Per-message model overrides on the session page are limited to models the harness can run; an override outside that set is rejected with an error such as `Model "openai/gpt-5.5" cannot run on the Claude Agent harness.` rather than replaced.
+
+## The CLI harnesses: Codex, Pi, DeepSeek Harness, ZCode
+
+These four run their vendor's coding-agent CLI inside the sandbox as a per-turn subprocess, in the vendor's non-interactive mode:
+
+- **Codex** (`codex exec --json`) runs OpenAI models. The conversation id is the CLI's `thread_id`; follow-up turns resume it with `codex exec resume`.
+- **Pi** (`pi --mode json`) runs any catalog provider. The session id is chosen up front (`--session-id` creates the conversation when absent), so continuity survives sandbox restores.
+- **DeepSeek Harness** (`dsh --profile headless --json`) runs DeepSeek models, resumed by `--session-id`. The CLI is a developer preview with breaking changes expected, so the image pins one exact official prerelease; expect it to move.
+- **ZCode** (`zcode --prompt`) runs Z.AI models, built into the image from the SHA-pinned source tarball (ZCode publishes no CLI package). Its headless output is plain text, conversation resume is not wired yet, and — unlike the others — it has **no API-key environment variable**: credentials come from ZCode's own login/credential store, so an API-key session needs that store staged before its first turn.
+
+All four are **API-key only**: they read the provider's API key from the session environment (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, and the other provider keys), and connected provider accounts are never offered for them. ZCode is the exception above: until its credential store can be staged, its sessions fail with a clear error rather than running unauthenticated.
+
+<Callout type="info" title="Per-turn subprocess">
+  Unlike OpenCode (a resident `opencode serve`) and Claude Agent (an SDK-owned child), the CLI
+  harnesses start a fresh agent process per prompt. Each vendor keeps its own conversation store
+  under the sandbox home directory, which the snapshot carries, so restore-resume works by session
+  id wherever the vendor supports it.
+</Callout>
 
 ## Claude Agent sessions
 

@@ -85,6 +85,13 @@ class ClaudeStagerConfig:
 
 
 @dataclass(frozen=True)
+class CliStagerConfig:
+    """What the subprocess CLI harnesses need staged before their first turn."""
+
+    has_repository: bool
+
+
+@dataclass(frozen=True)
 class ManagedSkillsConfig:
     control_plane_url: str
     sandbox_token: str
@@ -214,6 +221,9 @@ class RuntimeConfig:
             else ()
         )
         return ClaudeStagerConfig(has_repository=self.has_repository, mcp_servers=mcp_servers)
+
+    def cli_stager_config(self) -> CliStagerConfig:
+        return CliStagerConfig(has_repository=self.has_repository)
 
     def bridge_process_config(self) -> BridgeProcessConfig:
         return BridgeProcessConfig(

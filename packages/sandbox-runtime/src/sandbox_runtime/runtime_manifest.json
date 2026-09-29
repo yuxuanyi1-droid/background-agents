@@ -1,11 +1,15 @@
 {
-  "runtimeVersion": "v73-node-24",
-  "generation": 73,
+  "runtimeVersion": "v74-node-24",
+  "generation": 74,
   "minimumCompatibleGeneration": 62,
   "minimumPreservationGeneration": 71,
-  "minimumRebuildGeneration": 73,
+  "minimumRebuildGeneration": 74,
   "harnessMinimumGeneration": {
     "claude": 73,
-    "opencode": 73
+    "opencode": 73,
+    "codex": 74,
+    "pi": 74,
+    "dsh": 74,
+    "zcode": 74
   }
 }
