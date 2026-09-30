@@ -464,3 +464,34 @@ async def test_resident_settles_after_the_final_message_grace(tmp_path: Path) ->
     assert outcome.success
     assert events[-1]["type"] == "step_finish"
     await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_resident_reverse_request_during_setup_is_answered(tmp_path: Path) -> None:
+    # ZCode asks for runtime preferences WHILE session/create is still being
+    # awaited; the reply must come from the reader (the one place every
+    # inbound message passes), not from a consume loop that only runs later.
+    script = (
+        "import json, sys\n"
+        "def send(obj):\n"
+        "    print(json.dumps(obj), flush=True)\n"
+        "for line in sys.stdin:\n"
+        "    message = json.loads(line)\n"
+        "    kind = message.get('type')\n"
+        "    if kind == 'ensure':\n"
+        "        send({'id': 'server-9', 'method': 'ask'})\n"
+        "        reply = json.loads(sys.stdin.readline())\n"
+        "        if reply.get('id') == 'server-9':\n"
+        "            send({'id': message['id'], 'result': {'session': 's-1'}})\n"
+        "    elif kind == 'prompt':\n"
+        "        send({'id': message['id'], 'result': {'accepted': True}})\n"
+        "        send({'type': 'delta', 'text': 'Hi'})\n"
+        "        send({'type': 'done'})\n"
+    )
+    harness = _harness(_ResidentScriptVendor(script), tmp_path)
+    await harness.create_session()
+    outcome, events = await _run(harness)
+    assert outcome.success
+    assert harness.session_id == "s-1"
+    assert any(event["type"] == "token" and event["content"] == "Hi" for event in events)
+    await harness.close()

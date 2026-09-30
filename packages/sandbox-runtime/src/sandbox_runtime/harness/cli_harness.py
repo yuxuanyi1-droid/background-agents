@@ -423,10 +423,23 @@ class _ResidentServer:
                     future = self._pending.pop(request_id)
                     if not future.done():
                         future.set_result(message)
-                else:
-                    self._notifications.put_nowait(message)
+                    continue
+                # Answer server→client requests here — the one point every
+                # inbound message passes, so a reverse request sent while a
+                # setup or turn request is still blocking gets its reply
+                # within milliseconds instead of after that request dies.
+                for reply in self._vendor.server_request_messages(message):
+                    await self._write_frame(reply)
+                self._notifications.put_nowait(message)
         finally:
             self._notifications.put_nowait(_SERVER_EXITED)
+
+    async def _write_frame(self, frame: dict[str, Any]) -> None:
+        process = self._process
+        if process is None or process.stdin is None:
+            return
+        process.stdin.write((json.dumps(frame) + "\n").encode())
+        await process.stdin.drain()
 
     async def _drain_stderr(self, stream: asyncio.StreamReader) -> None:
         tail: deque[str] = deque(maxlen=16)
@@ -462,15 +475,6 @@ class _ResidentServer:
             ) from None
         finally:
             self._pending.pop(request_id, None)
-
-    async def send(self, frame: dict[str, Any]) -> None:
-        """Write one raw frame — no id assigned, no response awaited — the
-        seam for answering server→client requests."""
-        process = self._process
-        if process is None or process.stdin is None or not self.alive:
-            raise RuntimeError("The vendor protocol server is not running.")
-        process.stdin.write((json.dumps(frame) + "\n").encode())
-        await process.stdin.drain()
 
     async def next_notification(self, timeout: float) -> dict[str, Any] | None:
         try:
@@ -808,13 +812,8 @@ class CliHarness:
                 if tail:
                     detail += f" Stderr tail: {tail[-STDERR_TAIL_CHARS:]}"
                 raise CliServerDied(detail)
-            for reply in vendor.server_request_messages(message):
-                # Server→client requests must be answered — a permission or
-                # input prompt nobody replies to would hang the turn. Replies
-                # are fire-and-forget: a dead server surfaces as a death
-                # below or a failed turn request next time.
-                with contextlib.suppress(Exception):
-                    await server.send(reply)
+            # Reverse requests were already answered by the reader; here they
+            # only feed the vendor's translation.
             try:
                 events = vendor.parse_server_message(message, state)
             except CliTurnSettled as settled:
