@@ -10,7 +10,9 @@ import {
   updateCustomProviderRequestSchema,
   importCustomProviderModelsRequestSchema,
   updateCustomProviderModelRequestSchema,
+  customProviderConnectionTestRequestSchema,
   type CustomModelRecord,
+  type CustomProviderRecord,
   type ModelCatalogMatch,
 } from "@open-inspect/shared/types/custom-providers";
 import { Hono } from "hono";
@@ -32,10 +34,26 @@ const logger = createLogger("router:custom-providers");
 const NO_STORE = "private, no-store" as const;
 const SYNC_TIMEOUT_MS = 10_000;
 const MAX_SYNCED_MODELS = 500;
+const CONNECTION_TEST_TIMEOUT_MS = 20_000;
+const CONNECTION_TEST_DETAIL_MAX_CHARS = 300;
 
 function store(env: Env, ctx: RequestContext): CustomProviderStore | null {
   if (!ctx.db || !env.PROVIDER_ACCOUNTS_ENCRYPTION_KEY) return null;
   return new CustomProviderStore(ctx.db, env.PROVIDER_ACCOUNTS_ENCRYPTION_KEY);
+}
+
+/** Auth headers a gateway expects for its wire protocol, plus admin extras. */
+function gatewayRequestHeaders(
+  provider: Pick<CustomProviderRecord, "protocol" | "headers">,
+  apiKey: string
+): Record<string, string> {
+  return {
+    Accept: "application/json",
+    ...(provider.protocol === "anthropic"
+      ? { "x-api-key": apiKey, "anthropic-version": "2023-06-01" }
+      : { Authorization: `Bearer ${apiKey}` }),
+    ...Object.fromEntries(provider.headers.map((header) => [header.name, header.value])),
+  };
 }
 
 async function listProviders(_request: Request, env: Env, _params: object, ctx: RequestContext) {
@@ -92,11 +110,23 @@ async function updateProvider(
   );
   if (!parsed.success)
     return error(`Invalid custom provider update: ${parsed.error.issues[0]?.message}`, 400);
-  const record = await providers.update(params.id, parsed.data);
+  let record: Awaited<ReturnType<typeof providers.update>>;
+  try {
+    record = await providers.update(params.id, parsed.data);
+  } catch (updateError) {
+    // Crossing the Anthropic/OpenAI boundary re-keys the provider; another
+    // provider already holding the target key prefix is the only conflict.
+    const message = updateError instanceof Error ? updateError.message : String(updateError);
+    if (message.includes("idx_custom_provider_key_prefix")) {
+      return error("Another provider already owns this protocol's provider key", 409);
+    }
+    throw updateError;
+  }
   if (!record) return error("Custom provider not found", 404);
   logger.info("custom_provider.updated", {
     event: "custom_provider.updated",
     provider_id: record.id,
+    protocol: record.protocol,
     request_id: ctx.request_id,
   });
   return json({ provider: record });
@@ -159,15 +189,7 @@ async function syncProviderModels(
   if (apiKey === null) return error("Custom provider has no stored API key", 409);
 
   const url = `${provider.baseUrl.replace(/\/+$/, "")}/models`;
-  const headers: Record<string, string> = {
-    Accept: "application/json",
-    ...(provider.protocol === "anthropic"
-      ? { "x-api-key": apiKey, "anthropic-version": "2023-06-01" }
-      : { Authorization: `Bearer ${apiKey}` }),
-    ...Object.fromEntries(
-      provider.headers.map((header: { name: string; value: string }) => [header.name, header.value])
-    ),
-  };
+  const headers = gatewayRequestHeaders(provider, apiKey);
   let response: Response;
   try {
     response = await fetch(url, {
@@ -207,6 +229,131 @@ async function syncProviderModels(
       const match = matches.get(model.modelId);
       return match ? { ...model, catalog: match } : model;
     }),
+  });
+}
+
+/** A compact, relayable rendering of a gateway's error response body. */
+function gatewayErrorDetail(status: number, bodyText: string): string {
+  const text = bodyText.replace(/\s+/g, " ").trim().slice(0, CONNECTION_TEST_DETAIL_MAX_CHARS);
+  return text.length > 0 ? `HTTP ${status}: ${text}` : `HTTP ${status}`;
+}
+
+/** The minimal one-token request each wire protocol accepts for a model test. */
+function generationTestRequest(
+  protocol: CustomProviderRecord["protocol"],
+  modelId: string
+): { path: string; body: string } {
+  if (protocol === "anthropic") {
+    return {
+      path: "/messages",
+      body: JSON.stringify({
+        model: modelId,
+        max_tokens: 1,
+        messages: [{ role: "user", content: "ping" }],
+      }),
+    };
+  }
+  if (protocol === "openai_responses") {
+    return {
+      path: "/responses",
+      body: JSON.stringify({ model: modelId, max_output_tokens: 1, input: "ping" }),
+    };
+  }
+  return {
+    path: "/chat/completions",
+    body: JSON.stringify({
+      model: modelId,
+      max_tokens: 1,
+      messages: [{ role: "user", content: "ping" }],
+    }),
+  };
+}
+
+/**
+ * On-demand connectivity check. The result always answers 200 with `ok`
+ * reflecting the gateway's verdict, so the UI can surface the detail text for
+ * both outcomes; only configuration problems (missing provider/key) error out.
+ */
+async function testProviderConnection(
+  request: Request,
+  env: Env,
+  params: { id: string },
+  ctx: RequestContext
+) {
+  const providers = store(env, ctx);
+  if (!providers) return error("Custom provider storage is not configured", 503);
+  const provider = await providers.getById(params.id);
+  if (!provider) return error("Custom provider not found", 404);
+  const apiKey = await providers.readApiKey(provider.id);
+  if (apiKey === null) return error("Custom provider has no stored API key", 409);
+  const parsed = customProviderConnectionTestRequestSchema.safeParse(
+    (await request.json().catch(() => null)) ?? {}
+  );
+  if (!parsed.success)
+    return error(`Invalid connection test: ${parsed.error.issues[0]?.message}`, 400);
+
+  const root = provider.baseUrl.replace(/\/+$/, "");
+  const modelId = parsed.data.modelId;
+  const withModel = modelId !== undefined;
+  const generation = withModel ? generationTestRequest(provider.protocol, modelId) : null;
+  const target = generation ? `${root}${generation.path}` : `${root}/models`;
+  const init: RequestInit = {
+    method: generation ? "POST" : "GET",
+    headers: generation
+      ? { ...gatewayRequestHeaders(provider, apiKey), "Content-Type": "application/json" }
+      : gatewayRequestHeaders(provider, apiKey),
+    signal: AbortSignal.timeout(CONNECTION_TEST_TIMEOUT_MS),
+    redirect: "follow",
+    ...(generation ? { body: generation.body } : {}),
+  };
+
+  const startedAt = Date.now();
+  let response: Response;
+  try {
+    response = await fetch(target, init);
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    logger.warn("custom_provider.connection_test_failed", {
+      event: "custom_provider.connection_test_failed",
+      provider_id: provider.id,
+      error: reason,
+      request_id: ctx.request_id,
+    });
+    return json({
+      ok: false,
+      mode: generation ? "generation" : "models",
+      latencyMs: Date.now() - startedAt,
+      detail: `Request to ${target} failed: ${reason}`,
+    });
+  }
+  const latencyMs = Date.now() - startedAt;
+  const mode = generation ? "generation" : "models";
+  if (!response.ok) {
+    const bodyText = await response.text().catch(() => "");
+    return json({
+      ok: false,
+      mode,
+      latencyMs,
+      detail: gatewayErrorDetail(response.status, bodyText),
+    });
+  }
+  if (generation) {
+    return json({
+      ok: true,
+      mode,
+      latencyMs,
+      detail: `${modelId} responded to a one-token request`,
+    });
+  }
+  const listed = parseSyncedModelList(await response.json().catch(() => null)).length;
+  return json({
+    ok: true,
+    mode,
+    latencyMs,
+    detail:
+      listed > 0
+        ? `Model list reachable (${listed} models)`
+        : "Model list reachable (no data[] entries returned)",
   });
 }
 
@@ -353,6 +500,15 @@ customProviderRoutes.post(
     authorization: requirePermission("custom_providers.manage"),
   }),
   (c) => dispatch(c, syncProviderModels)
+);
+
+customProviderRoutes.post(
+  "/custom-providers/:id/test-connection",
+  admit({
+    ...SCM_AGNOSTIC_HUMAN_USER_ROUTE,
+    authorization: requirePermission("custom_providers.manage"),
+  }),
+  (c) => dispatch(c, testProviderConnection)
 );
 
 customProviderRoutes.get(

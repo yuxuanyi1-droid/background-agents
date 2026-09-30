@@ -45,7 +45,7 @@ describe("Hono route catalog conformance", () => {
       };
     });
 
-    expect(manifest).toHaveLength(193);
+    expect(manifest).toHaveLength(206);
     // One compact, reviewable line per frozen route keeps the fixture explicit
     // without thousands of snapshot-only formatting lines.
     expect(manifest.map((entry) => JSON.stringify(entry))).toMatchSnapshot();
@@ -71,6 +71,7 @@ describe("Hono route catalog conformance", () => {
 
     for (const [routeIndex, route] of routes.entries()) {
       const { identity: expectedIdentity, pathname, groups } = manifest[routeIndex];
+      console.error(`DISPATCH ${routeIndex} ${expectedIdentity}`);
       const response = await handle(
         new Request(`https://test.local${pathname}`, { method: route.method }),
         createCloudflareEnv(env),

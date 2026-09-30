@@ -195,6 +195,7 @@ export class CustomProviderStore {
     providerId: string,
     input: {
       name?: string;
+      protocol?: CustomProviderProtocol;
       baseUrl?: string;
       headers?: CustomProviderHeader[];
       status?: "active" | "disabled";
@@ -207,6 +208,10 @@ export class CustomProviderStore {
     if (input.name !== undefined) {
       assignments.push("name = ?");
       values.push(input.name);
+    }
+    if (input.protocol !== undefined) {
+      assignments.push("protocol = ?");
+      values.push(input.protocol);
     }
     if (input.baseUrl !== undefined) {
       assignments.push("base_url = ?");

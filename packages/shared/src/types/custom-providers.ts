@@ -114,6 +114,12 @@ export type CreateCustomProviderRequest = z.infer<typeof createCustomProviderReq
 
 export const updateCustomProviderRequestSchema = z.strictObject({
   name: customProviderNameSchema.optional(),
+  /**
+   * Protocol is editable after creation. Switching across the Anthropic/OpenAI
+   * boundary re-keys the provider (`cpa-…` ↔ `cpo-…`), which changes every
+   * imported model ID; the two OpenAI protocols share a key and do not.
+   */
+  protocol: customProviderProtocolSchema.optional(),
   baseUrl: customProviderBaseUrlSchema.optional(),
   headers: z.array(customProviderHeaderSchema).max(32).optional(),
   status: z.enum(["active", "disabled"]).optional(),
@@ -167,6 +173,29 @@ export type SyncedCustomProviderModel = z.infer<typeof syncedCustomProviderModel
 export const syncCustomProviderModelsResponseSchema = z.strictObject({
   models: z.array(syncedCustomProviderModelSchema).max(500),
 });
+
+/**
+ * On-demand connectivity check against a saved provider. Without `modelId` the
+ * check only lists models (auth + reachability); with it, the check issues a
+ * one-token generation request so the model is proven usable end to end.
+ */
+export const customProviderConnectionTestRequestSchema = z.strictObject({
+  modelId: z.string().min(1).max(200).optional(),
+});
+export type CustomProviderConnectionTestRequest = z.infer<
+  typeof customProviderConnectionTestRequestSchema
+>;
+
+export const customProviderConnectionTestResultSchema = z.strictObject({
+  ok: z.boolean(),
+  /** `models` for a list reachability check, `generation` for a model test. */
+  mode: z.enum(["models", "generation"]),
+  latencyMs: z.number().int().nonnegative(),
+  detail: z.string(),
+});
+export type CustomProviderConnectionTestResult = z.infer<
+  typeof customProviderConnectionTestResultSchema
+>;
 
 export const importCustomProviderModelSchema = z.strictObject({
   modelId: z.string().min(1).max(200),

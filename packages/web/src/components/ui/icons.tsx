@@ -339,6 +339,29 @@ export function ZaiIcon({ className, ...props }: IconProps) {
   );
 }
 
+// A gateway mark for admin-registered custom providers: a hub with radiating
+// links, deliberately vendor-neutral so no gateway is mistaken for a vendor.
+export function CustomProviderIcon({ className, ...props }: IconProps) {
+  return (
+    <svg
+      role="img"
+      className={className}
+      viewBox="0 0 24 24"
+      xmlns="http://www.w3.org/2000/svg"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      {...props}
+    >
+      <title>Custom provider</title>
+      <rect x="9.5" y="9.5" width="5" height="5" rx="1.5" />
+      <path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.64 5.64l2.12 2.12M16.24 16.24l2.12 2.12M18.36 5.64l-2.12 2.12M7.76 16.24l-2.12 2.12" />
+    </svg>
+  );
+}
+
 export function SlackIcon({ className }: IconProps) {
   return (
     <svg

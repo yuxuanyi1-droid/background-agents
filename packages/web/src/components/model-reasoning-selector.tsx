@@ -14,7 +14,7 @@ import {
   type HarnessId,
 } from "@open-inspect/shared/harnesses";
 import { formatModelNameLower } from "@/lib/format";
-import { BackIcon, ChevronDownIcon } from "@/components/ui/icons";
+import { BackIcon, ChevronDownIcon, CustomProviderIcon } from "@/components/ui/icons";
 import { HarnessIcon, HarnessName } from "@/components/harness-icon";
 import { useIsMobile } from "@/hooks/use-media-query";
 import {
@@ -281,6 +281,11 @@ function ModelOptions({
         <Fragment key={group.category}>
           {groupIndex > 0 && <DropdownMenuSeparator />}
           <DropdownMenuLabel className="text-xs uppercase tracking-wider text-secondary-foreground">
+            {/* Static models carry no wire protocol; only custom-provider
+                groups do, and they get the gateway mark. */}
+            {group.models.some((model) => model.protocol !== undefined) && (
+              <CustomProviderIcon className="size-3" aria-hidden="true" />
+            )}
             {group.category}
           </DropdownMenuLabel>
           {group.models.map((model) => (

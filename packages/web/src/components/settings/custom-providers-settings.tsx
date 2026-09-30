@@ -7,12 +7,14 @@ import {
   CUSTOM_MODEL_REASONING_EFFORTS,
   CUSTOM_PROVIDER_PROTOCOL_LABELS,
   type CustomModelRecord,
+  type CustomProviderConnectionTestResult,
   type CustomProviderHeader,
   type CustomProviderProtocol,
   type CustomProviderRecord,
   type SyncedCustomProviderModel,
 } from "@open-inspect/shared/types/custom-providers";
 import { browserApiFetch } from "@/lib/browser-api-fetch";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -26,6 +28,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { ChevronRightIcon, CustomProviderIcon } from "@/components/ui/icons";
 
 interface ImportedModelDraft {
   modelId: string;
@@ -63,6 +66,42 @@ async function api<T>(path: `/api/${string}`, init?: RequestInit): Promise<T> {
     throw new Error(message);
   }
   return body as T;
+}
+
+/**
+ * The two protocol families a provider key encodes: switching family re-keys
+ * the provider (`cpa-…` ↔ `cpo-…`) and with it every imported model ID.
+ */
+function protocolFamily(protocol: CustomProviderProtocol): "anthropic" | "openai" {
+  return protocol === "anthropic" ? "anthropic" : "openai";
+}
+
+interface ConnectionTestState {
+  running: boolean;
+  result: CustomProviderConnectionTestResult | null;
+  error: string | null;
+}
+
+const IDLE_TEST: ConnectionTestState = { running: false, result: null, error: null };
+
+function TestResultLine({ state }: { state: ConnectionTestState }) {
+  if (state.running) {
+    return <span className="text-xs text-muted-foreground">Testing connection…</span>;
+  }
+  if (state.error) {
+    return (
+      <span className="text-xs text-destructive" role="alert">
+        {state.error}
+      </span>
+    );
+  }
+  if (!state.result) return null;
+  const { result } = state;
+  return (
+    <span className={cn("text-xs", result.ok ? "text-success" : "text-destructive")} role="status">
+      {result.ok ? "Connected" : "Failed"} — {result.detail} ({result.latencyMs} ms)
+    </span>
+  );
 }
 
 function HeaderRows({
@@ -165,11 +204,14 @@ function ProviderDialog({
   onOpenChange,
   onSaved,
   existing,
+  modelCount,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSaved: () => void;
   existing: CustomProviderRecord | null;
+  /** Imported-model count, so a protocol family switch can warn about re-keying. */
+  modelCount: number;
 }) {
   const [name, setName] = useState(existing?.name ?? "");
   const [protocol, setProtocol] = useState<CustomProviderProtocol>(
@@ -180,6 +222,12 @@ function ProviderDialog({
   const [headers, setHeaders] = useState<CustomProviderHeader[]>(existing?.headers ?? []);
   const [saving, setSaving] = useState(false);
 
+  const protocolChanged = existing !== null && protocol !== existing.protocol;
+  const rekeysModels =
+    protocolChanged &&
+    protocolFamily(protocol) !== protocolFamily(existing.protocol) &&
+    modelCount > 0;
+
   const save = async () => {
     setSaving(true);
     try {
@@ -189,6 +237,7 @@ function ProviderDialog({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             name,
+            ...(protocolChanged ? { protocol } : {}),
             baseUrl,
             headers: headers.filter((header) => header.name && header.value),
             ...(apiKey ? { apiKey } : {}),
@@ -238,28 +287,40 @@ function ProviderDialog({
               placeholder="My gateway"
             />
           </div>
-          {!existing && (
-            <div className="space-y-1.5">
-              <Label>Protocol</Label>
-              <Select
-                value={protocol}
-                onValueChange={(value) => setProtocol(value as CustomProviderProtocol)}
+          <div className="space-y-1.5">
+            <Label>Protocol</Label>
+            <Select
+              value={protocol}
+              onValueChange={(value) => setProtocol(value as CustomProviderProtocol)}
+            >
+              <SelectTrigger aria-label="Protocol">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {(Object.keys(CUSTOM_PROVIDER_PROTOCOL_LABELS) as CustomProviderProtocol[]).map(
+                  (value) => (
+                    <SelectItem key={value} value={value}>
+                      {CUSTOM_PROVIDER_PROTOCOL_LABELS[value]}
+                    </SelectItem>
+                  )
+                )}
+              </SelectContent>
+            </Select>
+            {protocolChanged && (
+              <p
+                className={cn(
+                  "text-xs",
+                  rekeysModels ? "text-destructive" : "text-muted-foreground"
+                )}
               >
-                <SelectTrigger aria-label="Protocol">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {(Object.keys(CUSTOM_PROVIDER_PROTOCOL_LABELS) as CustomProviderProtocol[]).map(
-                    (value) => (
-                      <SelectItem key={value} value={value}>
-                        {CUSTOM_PROVIDER_PROTOCOL_LABELS[value]}
-                      </SelectItem>
-                    )
-                  )}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
+                {rekeysModels
+                  ? `Switching protocol family re-keys this provider's ${modelCount} imported model${
+                      modelCount === 1 ? "" : "s"
+                    } (cpa-… ↔ cpo-…): their IDs change, and sessions pinned to the old IDs must re-select the model.`
+                  : "Switching between the two OpenAI protocols keeps model IDs unchanged."}
+              </p>
+            )}
+          </div>
           <div className="space-y-1.5">
             <Label htmlFor="custom-provider-base-url">Base URL</Label>
             <Input
@@ -517,6 +578,10 @@ export function CustomProvidersSettings() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [importFor, setImportFor] = useState<CustomProviderRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Test state is keyed by provider ID and by full model ID (`cp?-…/model`),
+  // which cannot collide.
+  const [tests, setTests] = useState<Record<string, ConnectionTestState>>({});
+  const [expandedModels, setExpandedModels] = useState<ReadonlySet<string>>(new Set());
 
   const load = useCallback(async () => {
     try {
@@ -551,6 +616,20 @@ export function CustomProvidersSettings() {
     }
   };
 
+  const removeModel = async (provider: CustomProviderRecord, model: CustomModelRecord) => {
+    if (!window.confirm(`Remove "${model.displayName}" from the imported models?`)) return;
+    try {
+      await api(
+        `/api/custom-providers/${provider.id}/models/${encodeURIComponent(model.modelId)}`,
+        { method: "DELETE" }
+      );
+      toast.success("Model removed");
+      await load();
+    } catch (deleteError) {
+      toast.error(deleteError instanceof Error ? deleteError.message : "Delete failed");
+    }
+  };
+
   const toggleModel = async (provider: CustomProviderRecord, model: CustomModelRecord) => {
     try {
       await api(
@@ -578,6 +657,44 @@ export function CustomProvidersSettings() {
     } catch (statusError) {
       toast.error(statusError instanceof Error ? statusError.message : "Update failed");
     }
+  };
+
+  /** Provider-level test lists models; a modelId adds a one-token generation. */
+  const runConnectionTest = async (
+    key: string,
+    provider: CustomProviderRecord,
+    modelId?: string
+  ) => {
+    setTests((current) => ({ ...current, [key]: { running: true, result: null, error: null } }));
+    try {
+      const result = await api<CustomProviderConnectionTestResult>(
+        `/api/custom-providers/${provider.id}/test-connection`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(modelId ? { modelId } : {}),
+        }
+      );
+      setTests((current) => ({ ...current, [key]: { running: false, result, error: null } }));
+    } catch (testError) {
+      setTests((current) => ({
+        ...current,
+        [key]: {
+          running: false,
+          result: null,
+          error: testError instanceof Error ? testError.message : "Connection test failed",
+        },
+      }));
+    }
+  };
+
+  const toggleExpanded = (modelId: string) => {
+    setExpandedModels((current) => {
+      const next = new Set(current);
+      if (next.has(modelId)) next.delete(modelId);
+      else next.add(modelId);
+      return next;
+    });
   };
 
   return (
@@ -617,74 +734,160 @@ export function CustomProvidersSettings() {
       )}
 
       <div className="space-y-6">
-        {(providers ?? []).map((provider) => (
-          <div key={provider.id} className="rounded-lg border border-border p-4 space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <h3 className="text-sm font-semibold text-foreground">
-                  {provider.name}{" "}
-                  <span className="font-normal text-muted-foreground">
-                    · {CUSTOM_PROVIDER_PROTOCOL_LABELS[provider.protocol]} · {provider.providerKey}
+        {(providers ?? []).map((provider) => {
+          const providerModels = models[provider.id] ?? [];
+          const providerTest = tests[provider.id] ?? IDLE_TEST;
+          return (
+            <div key={provider.id} className="rounded-lg border border-border p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex min-w-0 items-start gap-2.5">
+                  <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md border border-border-muted text-foreground">
+                    <CustomProviderIcon className="size-4" aria-hidden="true" />
                   </span>
-                </h3>
-                <p className="text-xs text-muted-foreground">{provider.baseUrl}</p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="flex items-center gap-1.5 text-xs text-foreground">
-                  <Switch
-                    checked={provider.status === "active"}
-                    onCheckedChange={(checked) =>
-                      setStatus(provider, checked ? "active" : "disabled")
-                    }
-                    aria-label={`${provider.name} active`}
-                  />
-                  Active
-                </label>
-                <Button variant="subtle" size="xs" onClick={() => setImportFor(provider)}>
-                  Models
-                </Button>
-                <Button
-                  variant="subtle"
-                  size="xs"
-                  onClick={() => {
-                    setEditing(provider);
-                    setDialogOpen(true);
-                  }}
-                >
-                  Edit
-                </Button>
-                <Button variant="subtle" size="xs" onClick={() => remove(provider)}>
-                  Delete
-                </Button>
-              </div>
-            </div>
-            {(models[provider.id] ?? []).length > 0 && (
-              <div className="space-y-1">
-                {(models[provider.id] ?? []).map((model) => (
-                  <div
-                    key={model.modelId}
-                    className="flex items-center justify-between rounded border border-border-muted px-3 py-2"
-                  >
-                    <div className="min-w-0">
-                      <span className="text-sm text-foreground">{model.displayName}</span>
-                      <span className="text-xs text-muted-foreground ml-2 truncate">
-                        {model.id} · {model.contextWindowTokens.toLocaleString()} ctx ·{" "}
-                        {model.maxOutputTokens.toLocaleString()} out
-                        {model.reasoningEfforts.length > 0 &&
-                          ` · ${model.reasoningEfforts.join(", ")}`}
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-semibold text-foreground truncate">
+                      {provider.name}{" "}
+                      <span className="font-normal text-muted-foreground">
+                        · {CUSTOM_PROVIDER_PROTOCOL_LABELS[provider.protocol]}
                       </span>
-                    </div>
-                    <Switch
-                      checked={model.enabled}
-                      onCheckedChange={() => toggleModel(provider, model)}
-                      aria-label={`${model.displayName} enabled`}
-                    />
+                    </h3>
+                    <p className="text-xs text-muted-foreground truncate">
+                      {provider.baseUrl} · {provider.providerKey}
+                    </p>
                   </div>
-                ))}
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="flex items-center gap-1.5 text-xs text-foreground">
+                    <Switch
+                      checked={provider.status === "active"}
+                      onCheckedChange={(checked) =>
+                        setStatus(provider, checked ? "active" : "disabled")
+                      }
+                      aria-label={`${provider.name} active`}
+                    />
+                    Active
+                  </label>
+                  <Button
+                    variant="subtle"
+                    size="xs"
+                    onClick={() => runConnectionTest(provider.id, provider)}
+                    disabled={providerTest.running}
+                  >
+                    {providerTest.running ? "Testing..." : "Test"}
+                  </Button>
+                  <Button variant="subtle" size="xs" onClick={() => setImportFor(provider)}>
+                    Models
+                  </Button>
+                  <Button
+                    variant="subtle"
+                    size="xs"
+                    onClick={() => {
+                      setEditing(provider);
+                      setDialogOpen(true);
+                    }}
+                  >
+                    Edit
+                  </Button>
+                  <Button variant="subtle" size="xs" onClick={() => remove(provider)}>
+                    Delete
+                  </Button>
+                </div>
               </div>
-            )}
-          </div>
-        ))}
+              <TestResultLine state={providerTest} />
+              {providerModels.length > 0 && (
+                <div className="space-y-1">
+                  {providerModels.map((model) => {
+                    const expanded = expandedModels.has(model.id);
+                    const modelTest = tests[model.id] ?? IDLE_TEST;
+                    return (
+                      <div key={model.id} className="rounded border border-border-muted">
+                        <div className="flex items-center gap-2 px-3 py-2">
+                          <button
+                            type="button"
+                            onClick={() => toggleExpanded(model.id)}
+                            aria-expanded={expanded}
+                            className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                          >
+                            <ChevronRightIcon
+                              className={cn(
+                                "size-3.5 shrink-0 text-muted-foreground transition-transform",
+                                expanded && "rotate-90"
+                              )}
+                            />
+                            <span className="text-sm text-foreground truncate">
+                              {model.displayName}
+                            </span>
+                            <span className="text-xs text-muted-foreground truncate">
+                              {model.modelId}
+                            </span>
+                          </button>
+                          <Button
+                            variant="subtle"
+                            size="xs"
+                            onClick={() => removeModel(provider, model)}
+                            aria-label={`Delete ${model.displayName}`}
+                          >
+                            Delete
+                          </Button>
+                          <Switch
+                            checked={model.enabled}
+                            onCheckedChange={() => toggleModel(provider, model)}
+                            aria-label={`${model.displayName} enabled`}
+                          />
+                        </div>
+                        {expanded && (
+                          <div className="space-y-2 border-t border-border-muted px-3 py-2">
+                            <dl className="grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2">
+                              <div className="flex min-w-0 gap-2">
+                                <dt className="shrink-0 text-muted-foreground">Model ID</dt>
+                                <dd className="truncate font-mono text-foreground">{model.id}</dd>
+                              </div>
+                              <div className="flex gap-2">
+                                <dt className="shrink-0 text-muted-foreground">Modalities</dt>
+                                <dd className="text-foreground">{model.modalities.join(", ")}</dd>
+                              </div>
+                              <div className="flex gap-2">
+                                <dt className="shrink-0 text-muted-foreground">Context window</dt>
+                                <dd className="text-foreground">
+                                  {model.contextWindowTokens.toLocaleString()} tokens
+                                </dd>
+                              </div>
+                              <div className="flex gap-2">
+                                <dt className="shrink-0 text-muted-foreground">Max output</dt>
+                                <dd className="text-foreground">
+                                  {model.maxOutputTokens.toLocaleString()} tokens
+                                </dd>
+                              </div>
+                              <div className="flex gap-2">
+                                <dt className="shrink-0 text-muted-foreground">Thinking</dt>
+                                <dd className="text-foreground">
+                                  {model.reasoningEfforts.length > 0
+                                    ? model.reasoningEfforts.join(", ")
+                                    : "—"}
+                                </dd>
+                              </div>
+                            </dl>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Button
+                                variant="subtle"
+                                size="xs"
+                                onClick={() => runConnectionTest(model.id, provider, model.modelId)}
+                                disabled={modelTest.running}
+                              >
+                                {modelTest.running ? "Testing..." : "Test model"}
+                              </Button>
+                              <TestResultLine state={modelTest} />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {dialogOpen && (
@@ -693,6 +896,7 @@ export function CustomProvidersSettings() {
           open={dialogOpen}
           onOpenChange={setDialogOpen}
           existing={editing}
+          modelCount={editing ? (models[editing.id] ?? []).length : 0}
           onSaved={load}
         />
       )}
