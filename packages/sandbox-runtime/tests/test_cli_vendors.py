@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from sandbox_runtime.custom_providers import load_custom_providers
+from sandbox_runtime.custom_providers import codex_model_catalog_path, load_custom_providers
 from sandbox_runtime.harness.base import HarnessId, TurnOutcome
 from sandbox_runtime.harness.cli_harness import CliTurnState
 from sandbox_runtime.harness.cli_vendors import (
@@ -72,6 +72,19 @@ class TestCodex:
         )
         assert argv[argv.index("-c") + 1] == "model_provider=cpo-55443322"
         assert argv[argv.index("--model") + 1] == "gpt-x"
+        # The routed turn also points at the generated model catalog, so the
+        # CLI resolves the gateway model's metadata instead of falling back.
+        assert f"model_catalog_json={codex_model_catalog_path()}" in argv
+
+    def test_official_model_argv_carries_no_catalog_override(self) -> None:
+        argv = CodexVendor().build_argv(
+            session_id=None,
+            prompt_text="do it",
+            model="openai/gpt-5.5",
+            reasoning_effort=None,
+            workdir=WORKDIR,
+        )
+        assert not any(argument.startswith("model_catalog_json=") for argument in argv)
 
     def test_prepare_writes_openai_protocol_gates_into_codex_config(
         self, tmp_path, monkeypatch
@@ -104,6 +117,8 @@ class TestCodex:
         assert "[model_providers.cpo-55443322]" in config
         assert 'wire_api = "responses"' in config
         assert "sk-r" not in config
+        catalog = json.loads((tmp_path / ".codex" / "custom-models.json").read_text())
+        assert [model["slug"] for model in catalog["models"]] == ["gpt-x"]
 
     def test_translates_thread_items_and_completion(self) -> None:
         vendor = CodexVendor()

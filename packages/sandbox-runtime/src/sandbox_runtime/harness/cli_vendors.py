@@ -24,7 +24,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..custom_providers import (
+    codex_model_catalog_path,
     dsh_model_selection_patch,
+    write_codex_model_catalog,
     write_codex_model_providers,
     write_dsh_profile_patch,
     write_pi_models_json,
@@ -93,6 +95,11 @@ class CodexVendor:
         ]
         if model_provider:
             argv += ["-c", f"model_provider={model_provider}"]
+            # The catalog carries the routed model's metadata (context window,
+            # effort levels); without it the CLI falls back to hardcoded
+            # defaults and warns every turn. Passed per turn so sessions on
+            # official models keep the CLI's own bundled catalog.
+            argv += ["-c", f"model_catalog_json={codex_model_catalog_path()}"]
         bare = _bare_model(model)
         if bare:
             argv += ["--model", bare]
@@ -107,6 +114,7 @@ class CodexVendor:
     def prepare(self, custom_providers: tuple[CustomProvider, ...]) -> None:
         """Register OpenAI-protocol gateways in the CLI's ``config.toml``."""
         write_codex_model_providers(Path.home() / ".codex" / "config.toml", custom_providers)
+        write_codex_model_catalog(codex_model_catalog_path(), custom_providers)
 
     def parse_record(self, record: dict[str, Any], state: CliTurnState) -> list[Any]:
         kind = record.get("type")

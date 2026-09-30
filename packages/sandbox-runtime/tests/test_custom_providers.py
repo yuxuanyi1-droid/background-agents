@@ -232,6 +232,66 @@ def test_write_codex_model_providers_without_openai_providers_writes_nothing(tmp
     assert not config.exists()
 
 
+def test_codex_catalog_covers_responses_models_only():
+    from sandbox_runtime.custom_providers import codex_model_catalog
+
+    providers = load_custom_providers(
+        {
+            CUSTOM_PROVIDERS_ENV: json.dumps(
+                [responses_manifest(), openai_manifest(), anthropic_manifest()]
+            ),
+            "CP_55443322_API_KEY": "sk-r",
+            "CP_99887766_API_KEY": "sk-c",
+            "CP_00112233_API_KEY": "sk-a",
+        }
+    )
+    catalog = codex_model_catalog(providers)
+    assert [model["slug"] for model in catalog["models"]] == ["gpt-x"]
+    entry = catalog["models"][0]
+    assert entry["display_name"] == "GPT X"
+    assert entry["context_window"] == 400_000
+    assert entry["max_context_window"] == 400_000
+    # The CLI refuses to load an entry without instruction text.
+    assert entry["model_messages"]["instructions_template"].startswith("You are a coding agent")
+    assert entry["supported_reasoning_levels"] == [
+        {"effort": "high", "description": "Deeper reasoning for complex problems"}
+    ]
+    assert entry["default_reasoning_level"] == "high"
+
+
+def test_codex_catalog_defaults_away_from_none_and_fills_effort_copy():
+    from sandbox_runtime.custom_providers import codex_model_catalog
+
+    manifest = responses_manifest()
+    manifest["models"][0]["reasoningEfforts"] = ["none", "xhigh"]
+    providers = load_custom_providers(manifest_env(manifest))
+
+    entry = codex_model_catalog(providers)["models"][0]
+    assert [level["effort"] for level in entry["supported_reasoning_levels"]] == [
+        "none",
+        "xhigh",
+    ]
+    # "none" only marks a gateway that accepts disabling reasoning; it is not
+    # a sensible default, so the last real level wins.
+    assert entry["default_reasoning_level"] == "xhigh"
+
+
+def test_write_codex_model_catalog_is_idempotent(tmp_path: Path):
+    from sandbox_runtime.custom_providers import write_codex_model_catalog
+
+    catalog_path = tmp_path / ".codex" / "custom-models.json"
+    providers = load_custom_providers(manifest_env(responses_manifest()))
+    assert write_codex_model_catalog(catalog_path, providers) is True
+    written = catalog_path.read_text()
+    assert json.loads(written)["models"][0]["slug"] == "gpt-x"
+    assert write_codex_model_catalog(catalog_path, providers) is False
+    assert catalog_path.read_text() == written
+
+    # Without Responses-protocol providers nothing is written at all.
+    assert write_codex_model_catalog(tmp_path / "other.json", ()) is False
+    assert not (tmp_path / "other.json").exists()
+
+
 # --- Pi models.json and dsh profile patch ---
 
 

@@ -12,8 +12,8 @@ Three consumers:
   and derives the child's ``ANTHROPIC_*`` credential environment
   (``harness.claude``)
 - The Codex harness resolves an OpenAI-protocol provider for a model ID and
-  writes a ``[model_providers.*]`` entry into the CLI's ``config.toml``
-  (``harness.cli_vendors``)
+  writes a ``[model_providers.*]`` entry plus a model catalog into the CLI's
+  ``config.toml`` and ``~/.codex`` (``harness.cli_vendors``)
 """
 
 from __future__ import annotations
@@ -22,11 +22,11 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from pathlib import Path
 
 CUSTOM_PROVIDERS_ENV = "CUSTOM_MODEL_PROVIDERS"
 _ANTHROPIC_PROTOCOL = "anthropic"
@@ -321,6 +321,102 @@ def write_codex_model_providers(config_path: Path, providers: tuple[CustomProvid
     if merged == existing:
         return False
     config_path.write_text(merged)
+    return True
+
+
+# --- Codex model catalog -------------------------------------------------------
+
+# The CLI resolves a model slug against its bundled catalog and, for slugs it
+# does not know (every gateway model), degrades to fallback metadata — a
+# hardcoded context window and a per-turn warning — unless a catalog supplies
+# the entry. Catalog entries require instruction text, and the generic prompt
+# the fallback itself uses is compiled into the CLI binary, so the same text
+# is vendored here. Copied verbatim from codex-rs `models-manager/prompt.md`
+# at the version sandbox-images' toolchain.json pins; refresh it alongside a
+# codex bump.
+_CODEX_BASE_PROMPT = Path(__file__).with_name("codex_base_prompt.md").read_text()
+
+# Menu copy Codex shows next to each effort level; descriptions are ours.
+_CODEX_EFFORT_DESCRIPTIONS = {
+    "none": "Disable reasoning for the fastest responses",
+    "low": "Fast responses with lighter reasoning",
+    "medium": "Balanced reasoning depth",
+    "high": "Deeper reasoning for complex problems",
+    "xhigh": "Extra deep reasoning for hard problems",
+    "max": "Maximum reasoning depth for the hardest problems",
+}
+
+
+def codex_model_catalog_path(home: Path | None = None) -> Path:
+    """Location of the generated catalog inside the Codex home directory."""
+    return (home if home is not None else Path.home()) / ".codex" / "custom-models.json"
+
+
+def _codex_catalog_entry(model: CustomModelEntry) -> dict[str, Any]:
+    """One ``ModelInfo`` record, mirroring the CLI's fallback defaults.
+
+    Every field the registry knows (slug, context window, effort levels) is
+    supplied; the rest matches what ``model_info_from_slug`` would build for
+    an unknown slug, so routing a catalog hit changes the metadata, not the
+    agent behavior.
+    """
+    efforts = list(model.reasoning_efforts)
+    default = "high" if "high" in efforts else next((e for e in efforts if e != "none"), None)
+    entry: dict[str, Any] = {
+        "slug": model.model_id,
+        "display_name": model.display_name,
+        "supported_reasoning_levels": [
+            {"effort": effort, "description": _CODEX_EFFORT_DESCRIPTIONS.get(effort, effort)}
+            for effort in efforts
+        ],
+        "shell_type": "unified_exec",
+        "visibility": "list",
+        "supported_in_api": True,
+        "priority": 99,
+        "support_verbosity": False,
+        "truncation_policy": {"mode": "tokens", "limit": 10_000},
+        "experimental_supported_tools": [],
+        "context_window": model.context_window_tokens,
+        "max_context_window": model.context_window_tokens,
+        "model_messages": {"instructions_template": _CODEX_BASE_PROMPT},
+    }
+    if default is not None:
+        entry["default_reasoning_level"] = default
+    return entry
+
+
+def codex_model_catalog(providers: tuple[CustomProvider, ...]) -> dict[str, Any] | None:
+    """A ``ModelsResponse`` catalog covering the Responses-protocol models.
+
+    Only those models route to Codex, so only they need catalog entries. The
+    slug is the bare model id — the form the CLI is invoked with, since the
+    provider rides ``-c model_provider`` instead.
+    """
+    models = [
+        _codex_catalog_entry(model)
+        for provider in providers
+        if provider.protocol == _OPENAI_RESPONSES_PROTOCOL
+        for model in provider.models
+    ]
+    return {"models": models} if models else None
+
+
+def write_codex_model_catalog(catalog_path: Path, providers: tuple[CustomProvider, ...]) -> bool:
+    """Write the generated catalog, replacing any earlier generated one.
+
+    The file is ours alone (the CLI never writes it), so it regenerates
+    wholesale. It takes effect only through the per-turn
+    ``-c model_catalog_json`` override the harness passes while a custom
+    provider is routed — official-model sessions keep the CLI's own catalog.
+    """
+    catalog = codex_model_catalog(providers)
+    if catalog is None:
+        return False
+    body = json.dumps(catalog, indent=2) + "\n"
+    catalog_path.parent.mkdir(parents=True, exist_ok=True)
+    if catalog_path.exists() and catalog_path.read_text() == body:
+        return False
+    catalog_path.write_text(body)
     return True
 
 
