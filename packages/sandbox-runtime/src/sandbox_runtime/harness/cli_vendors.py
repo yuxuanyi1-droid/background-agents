@@ -132,6 +132,7 @@ class CodexVendor:
     binary = "codex"
     json_stream = True
     resident = True
+    jsonrpc = True  # the app-server speaks JSON-RPC 2.0 proper
 
     def __init__(self) -> None:
         # The thread id this server process created; a persisted id adopted
@@ -703,6 +704,9 @@ class ZcodeVendor:
     binary = "zcode"
     json_stream = False
     resident = True
+    # The wire schema is strict: a jsonrpc envelope field would see every
+    # request rejected with -32600 and no correlatable response.
+    jsonrpc = False
 
     def __init__(self) -> None:
         self._live_session_id: str | None = None

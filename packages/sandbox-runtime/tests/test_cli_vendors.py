@@ -463,6 +463,14 @@ def test_registry_lists_only_cli_harnesses() -> None:
     assert get_cli_vendor(HarnessId.CLAUDE) is None
 
 
+def test_resident_envelopes_match_each_wire_schema() -> None:
+    # Codex speaks JSON-RPC 2.0; Pi and ZCode reject or do not use the
+    # envelope field, so the resident server must not inject it for them.
+    assert CodexVendor.jsonrpc is True
+    assert PiVendor.jsonrpc is False
+    assert ZcodeVendor.jsonrpc is False
+
+
 class TestCodex:
     def test_fresh_and_resume_argv(self) -> None:
         vendor = CodexVendor()

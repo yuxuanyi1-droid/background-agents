@@ -432,6 +432,12 @@ class _ResidentServer:
             process.stdin.write((json.dumps(payload) + "\n").encode())
             await process.stdin.drain()
             return await asyncio.wait_for(future, timeout)
+        except TimeoutError:
+            # Name the request: an unanswered one must not read as the turn's
+            # own budget running out.
+            raise CliPromptTimeout(
+                f"No response to {_request_label(payload)} within {timeout:.0f}s."
+            ) from None
         finally:
             self._pending.pop(request_id, None)
 
