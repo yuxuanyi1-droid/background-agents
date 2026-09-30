@@ -9,7 +9,7 @@ npm ci --ignore-scripts --no-audit --no-fund
 # Run only the explicitly reviewed native binary installers. npm's lifecycle defaults differ by substrate.
 node node_modules/opencode-ai/postinstall.mjs
 node node_modules/bun/install.js
-for command in opencode bun bunx pnpm codex pi dsh; do
+for command in opencode bun bunx pnpm codex pi; do
   ln -sf "/opt/openinspect/tools/node_modules/.bin/$command" "/usr/local/bin/$command"
 done
 cp "$OI_BUNDLE/packages/sandbox-images/locks/plugins/"package*.json /app/opencode-deps/

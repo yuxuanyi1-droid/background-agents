@@ -109,7 +109,7 @@ def build_agent_harness(
                 limits=limits,
                 credential_client=credential_client,
             )
-        case HarnessId.CODEX | HarnessId.PI | HarnessId.DSH | HarnessId.ZCODE:
+        case HarnessId.CODEX | HarnessId.PI | HarnessId.ZCODE:
             cli_handoff = CliHarnessHandoff.read()
             vendor = get_cli_vendor(harness_id)
             if vendor is None:

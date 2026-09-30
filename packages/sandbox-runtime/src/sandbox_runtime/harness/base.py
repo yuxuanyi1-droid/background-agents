@@ -34,7 +34,6 @@ class HarnessId(StrEnum):
     CLAUDE = "claude"
     CODEX = "codex"
     PI = "pi"
-    DSH = "dsh"
     ZCODE = "zcode"
 
 

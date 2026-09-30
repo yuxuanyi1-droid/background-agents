@@ -25,7 +25,7 @@
         "spawnDepth": { "type": "number" },
         "harness": {
           "type": "string",
-          "enum": ["opencode", "claude", "codex", "pi", "dsh", "zcode"]
+          "enum": ["opencode", "claude", "codex", "pi", "zcode"]
         },
         "repoOwner": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
         "repoName": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
@@ -212,7 +212,7 @@
                 "anyOf": [
                   {
                     "type": "string",
-                    "enum": ["opencode", "claude", "codex", "pi", "dsh", "zcode"]
+                    "enum": ["opencode", "claude", "codex", "pi", "zcode"]
                   },
                   { "type": "null" }
                 ]

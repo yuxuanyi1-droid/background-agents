@@ -1,7 +1,6 @@
 import { getHarnessLabel, type HarnessId } from "@open-inspect/shared/harnesses";
 import {
   AnthropicIcon,
-  DeepSeekIcon,
   OpenAIIcon,
   OpenCodeIcon,
   PiIcon,
@@ -15,7 +14,6 @@ const HARNESS_ICONS = {
   claude: AnthropicIcon,
   codex: OpenAIIcon,
   pi: PiIcon,
-  dsh: DeepSeekIcon,
   zcode: ZaiIcon,
 } as const satisfies Record<HarnessId, unknown>;
 

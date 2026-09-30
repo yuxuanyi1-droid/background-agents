@@ -17,7 +17,7 @@ import { VALID_MODELS } from "./models";
 
 describe("harness catalog", () => {
   it("lists only harnesses the runtime can boot, built-in first", () => {
-    expect(HARNESS_IDS).toEqual(["opencode", "claude", "codex", "pi", "dsh", "zcode"]);
+    expect(HARNESS_IDS).toEqual(["opencode", "claude", "codex", "pi", "zcode"]);
     expect(DEFAULT_HARNESS).toBe("opencode");
   });
 
@@ -54,8 +54,6 @@ describe("harnessSupportsModel", () => {
   it("routes each vendor harness to the models its vendor serves", () => {
     expect(harnessSupportsModel("codex", "openai/gpt-5.5")).toBe(true);
     expect(harnessSupportsModel("codex", "anthropic/claude-sonnet-4-6")).toBe(false);
-    expect(harnessSupportsModel("dsh", "deepseek/deepseek-v4-pro")).toBe(true);
-    expect(harnessSupportsModel("dsh", "openai/gpt-5.5")).toBe(false);
     expect(harnessSupportsModel("zcode", "zai-coding-plan/glm-5.3")).toBe(true);
     expect(harnessSupportsModel("zcode", "cpa-00112233/glm-4.7")).toBe(true);
     expect(harnessSupportsModel("zcode", "openai/gpt-5.5")).toBe(false);
@@ -109,8 +107,6 @@ describe("harnessSupportsProviderAuth", () => {
   it("restricts the API-key-only harnesses to API-key auth", () => {
     expect(harnessSupportsProviderAuth("codex", "openai", "api_key")).toBe(true);
     expect(harnessSupportsProviderAuth("codex", "openai", "provider_account")).toBe(false);
-    expect(harnessSupportsProviderAuth("dsh", "deepseek", "api_key")).toBe(true);
-    expect(harnessSupportsProviderAuth("dsh", "deepseek", "provider_account")).toBe(false);
     expect(harnessSupportsProviderAuth("zcode", "zai-coding-plan", "api_key")).toBe(true);
     expect(harnessSupportsProviderAuth("zcode", "zai-coding-plan", "provider_account")).toBe(false);
     expect(harnessSupportsProviderAuth("pi", "deepseek", "api_key")).toBe(true);
@@ -208,12 +204,10 @@ describe("harnessSupportsCustomModel", () => {
     expect(harnessSupportsCustomModel("codex", "cpa-00112233/glm-5.3", "anthropic")).toBe(false);
   });
 
-  it("runs every custom protocol on pi and dsh", () => {
-    for (const harness of ["pi", "dsh"] as const) {
-      for (const protocol of ["anthropic", "openai_compatible", "openai_responses"] as const) {
-        expect(harnessSupportsCustomModel(harness, "cpo-99887766/glm-5.3", protocol)).toBe(true);
-        expect(harnessSupportsCustomModel(harness, "cpa-00112233/glm-5.3", protocol)).toBe(true);
-      }
+  it("runs every custom protocol on pi", () => {
+    for (const protocol of ["anthropic", "openai_compatible", "openai_responses"] as const) {
+      expect(harnessSupportsCustomModel("pi", "cpo-99887766/glm-5.3", protocol)).toBe(true);
+      expect(harnessSupportsCustomModel("pi", "cpa-00112233/glm-5.3", protocol)).toBe(true);
     }
   });
 

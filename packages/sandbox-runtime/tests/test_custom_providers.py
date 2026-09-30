@@ -292,7 +292,7 @@ def test_write_codex_model_catalog_is_idempotent(tmp_path: Path):
     assert not (tmp_path / "other.json").exists()
 
 
-# --- Pi models.json and dsh profile patch ---
+# --- Pi models.json ---
 
 
 def _load_both() -> tuple:
@@ -331,29 +331,6 @@ def test_write_pi_models_json_merges_and_is_idempotent(tmp_path: Path):
     assert json.loads(config.read_text()) == written
 
 
-def test_dsh_patch_declares_routes_and_selection():
-    from sandbox_runtime.custom_providers import (
-        dsh_model_selection_patch,
-        dsh_profile_patch_entries,
-    )
-
-    entries = dsh_profile_patch_entries(_load_both())
-    text = "\n".join(entries)
-    assert "- id: llm-pi-ai" in text
-    assert '      "cpo-99887766":' in text
-    assert "        api: openai-completions" in text
-    assert "        api: anthropic-messages" in text
-    assert '        apiKeyEnv: "CP_00112233_API_KEY"' in text
-    assert "            contextWindow: 200000" in text
-    assert '            reasoningEfforts: {"high": "high"}' in text
-
-    selection = dsh_model_selection_patch("cpo-99887766", "glm-4.7", "none")
-    assert 'provider: "cpo-99887766"' in selection
-    assert 'model: "glm-4.7"' in selection
-    assert 'reasoningEffort: "off"' in selection
-    assert dsh_model_selection_patch("cpo-99887766", "glm-4.7", None).count("\n") == 4
-
-
 @pytest.mark.parametrize(
     "registered,expected",
     [
@@ -362,13 +339,12 @@ def test_dsh_patch_declares_routes_and_selection():
         ("https://gateway.example/api/anthropic/v1/", "https://gateway.example/api/anthropic"),
     ],
 )
-def test_pi_dsh_and_zcode_write_anthropic_gateways_at_the_api_root(registered: str, expected: str):
-    """Every vendored Anthropic client (pi-ai's for Pi and dsh, ZCode's own)
-    joins ``/v1/messages`` itself, so the CLIs' configs carry the API root — a
+def test_pi_and_zcode_write_anthropic_gateways_at_the_api_root(registered: str, expected: str):
+    """Every vendored Anthropic client (pi-ai's for Pi, ZCode's own) joins
+    ``/v1/messages`` itself, so the CLIs' configs carry the API root — a
     registered version segment would be requested twice. OpenAI gateways keep
     the segment (their clients append only the wire path)."""
     from sandbox_runtime.custom_providers import (
-        dsh_profile_patch_entries,
         pi_models_document,
         zcode_provider_config_document,
     )
@@ -380,9 +356,6 @@ def test_pi_dsh_and_zcode_write_anthropic_gateways_at_the_api_root(registered: s
     pi_url = pi_models_document(providers)["providers"]["cpa-00112233"]["baseUrl"]
     assert pi_url == expected
 
-    dsh_text = "\n".join(dsh_profile_patch_entries(providers))
-    assert f'baseURL: "{expected}"' in dsh_text
-
     zcode_rule = zcode_provider_config_document(providers)["config"]["providerConfigRules"][
         "providerRules"
     ][0]
@@ -393,21 +366,6 @@ def test_pi_dsh_and_zcode_write_anthropic_gateways_at_the_api_root(registered: s
         pi_models_document(openai_providers)["providers"]["cpo-99887766"]["baseUrl"]
         == "https://gateway.example/v1"
     )
-    assert 'baseURL: "https://gateway.example/v1"' in "\n".join(
-        dsh_profile_patch_entries(openai_providers)
-    )
-
-
-def test_write_dsh_profile_patch_regenerates(tmp_path: Path):
-    from sandbox_runtime.custom_providers import write_dsh_profile_patch
-
-    patch = tmp_path / "cordis.patch.yml"
-    assert write_dsh_profile_patch(patch, _load_both()) is True
-    body = patch.read_text()
-    assert body.startswith("- id: llm-pi-ai\n")
-    assert write_dsh_profile_patch(patch, _load_both()) is False
-    patch.write_text(body + "# trailing edit\n")
-    assert write_dsh_profile_patch(patch, _load_both()) is True
 
 
 # --- zcode personal provider config ---

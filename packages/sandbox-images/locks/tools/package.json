@@ -7,7 +7,6 @@
     "@opencode-ai/plugin": "1.18.29",
     "@openai/codex": "0.159.0",
     "@earendil-works/pi-coding-agent": "0.87.1",
-    "@deepseek-ai/dsh": "0.1.7-rc.2",
     "zod": "4.4.3",
     "pnpm": "10.34.5",
     "bun": "1.4.2"

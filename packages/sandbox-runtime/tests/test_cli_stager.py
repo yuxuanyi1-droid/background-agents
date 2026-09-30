@@ -46,7 +46,7 @@ async def test_start_stages_bin_scripts_and_handoff(tmp_path: Path, monkeypatch)
     assert handoff.has_repository is False
 
 
-@pytest.mark.parametrize("harness", ["codex", "pi", "dsh", "zcode"])
+@pytest.mark.parametrize("harness", ["codex", "pi", "zcode"])
 def test_build_harness_process_selects_cli_stager(harness: str) -> None:
     process = build_harness_process(
         _config(harness), asyncio.Event(), MagicMock(), MagicMock(), None
@@ -59,7 +59,6 @@ def test_build_harness_process_selects_cli_stager(harness: str) -> None:
     [
         (HarnessId.CODEX, ".codex/skills"),
         (HarnessId.PI, ".pi/agent/skills"),
-        (HarnessId.DSH, ".dsh/skills"),
         (HarnessId.ZCODE, ".zcode/skills"),
     ],
 )

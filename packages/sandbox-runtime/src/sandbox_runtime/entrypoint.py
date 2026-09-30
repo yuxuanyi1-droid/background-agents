@@ -64,7 +64,7 @@ def build_harness_process(
             )
         case HarnessId.CLAUDE:
             return ClaudeStager(config.claude_stager_config(), log, config_dir=claude_config_dir)
-        case HarnessId.CODEX | HarnessId.PI | HarnessId.DSH | HarnessId.ZCODE:
+        case HarnessId.CODEX | HarnessId.PI | HarnessId.ZCODE:
             return CliStager(config.cli_stager_config(), log)
     raise ValueError(f"Unsupported harness: {config.harness}")
 
@@ -97,8 +97,6 @@ def managed_skills_destination(harness: HarnessId, claude_config_dir: Path | Non
             return Path.home() / ".codex" / "skills"
         case HarnessId.PI:
             return Path.home() / ".pi" / "agent" / "skills"
-        case HarnessId.DSH:
-            return Path.home() / ".dsh" / "skills"
         case HarnessId.ZCODE:
             return Path.home() / ".zcode" / "skills"
     raise ValueError(f"Unsupported harness: {harness}")

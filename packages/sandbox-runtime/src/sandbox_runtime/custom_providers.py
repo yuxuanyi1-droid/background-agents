@@ -12,8 +12,8 @@ Three consumers:
   and derives the child's ``ANTHROPIC_*`` credential environment
   (``harness.claude``)
 - The CLI harnesses write vendor config files — Codex a ``[model_providers.*]``
-  entry plus a model catalog in ``~/.codex``, Pi a ``models.json``, dsh a
-  profile patch, ZCode a personal provider config (``harness.cli_vendors``)
+  entry plus a model catalog in ``~/.codex``, Pi a ``models.json``, ZCode a
+  personal provider config (``harness.cli_vendors``)
 """
 
 from __future__ import annotations
@@ -212,8 +212,8 @@ def opencode_provider_config(providers: tuple[CustomProvider, ...]) -> dict[str,
 def anthropic_root_base_url(base_url: str) -> str:
     """The base URL an Anthropic-protocol client wants: the API root.
 
-    Anthropic clients (Claude Code, the SDK pi-ai embeds, hence both the Pi
-    and dsh harnesses) append ``/v1/messages`` themselves, so a base URL
+    Anthropic clients (Claude Code, the SDK pi-ai embeds, hence the Pi
+    harness) append ``/v1/messages`` themselves, so a base URL
     registered with a trailing ``/v1`` — the SDK-style form gateways also
     document for their model-list endpoints — would be requested at
     ``/v1/v1/messages``. Strip the version segment so both registration
@@ -256,7 +256,7 @@ def codex_model_provider_entries(providers: tuple[CustomProvider, ...]) -> str:
 
     Chat-completions gateways are not registered: the CLI removed
     ``wire_api = "chat"`` support and refuses to load a config that still
-    carries it, so those routes belong to the Pi and dsh harnesses.
+    carries it, so those routes belong to the Pi harness.
     """
     sections: list[str] = []
     for provider in providers:
@@ -493,105 +493,6 @@ def write_pi_models_json(config_path: Path, providers: tuple[CustomProvider, ...
         return False
     config_path.write_text(json.dumps(existing, indent=2) + "\n")
     return True
-
-
-# --- dsh (cordis profile patch) ----------------------------------------------
-
-
-_DSH_API_BY_PROTOCOL = _PI_API_BY_PROTOCOL
-
-
-def _yaml_scalar(value: str) -> str:
-    return json.dumps(value)
-
-
-def dsh_profile_patch_entries(providers: tuple[CustomProvider, ...]) -> list[str]:
-    """The ``cordis.patch.yml`` entry declaring every provider's route.
-
-    The ``llm-pi-ai`` service's config is a dict keyed by provider route, so
-    one patch entry carries all of them: endpoint, protocol, the credential
-    ref (the provider's env var name, which the credential seam resolves from
-    the environment), and the model catalog with the sizes the registry
-    imported. Anthropic gateways are written at their API root — pi-ai's
-    Anthropic client joins ``/v1/messages`` itself — while OpenAI gateways
-    keep the registered version segment.
-    """
-    if not providers:
-        return []
-    lines = ["- id: llm-pi-ai", "  config:", "    providers:"]
-    for provider in providers:
-        api = _DSH_API_BY_PROTOCOL.get(provider.protocol)
-        if api is None:
-            continue
-        base_url = (
-            anthropic_root_base_url(provider.base_url)
-            if provider.is_anthropic_protocol
-            else provider.base_url
-        )
-        lines.append(f"      {_yaml_scalar(provider.provider_key)}:")
-        lines.append(f"        displayName: {_yaml_scalar(provider.provider_key)}")
-        lines.append(f"        api: {api}")
-        lines.append(f"        baseURL: {_yaml_scalar(base_url)}")
-        lines.append(f"        apiKeyEnv: {_yaml_scalar(provider.api_key_env)}")
-        if provider.models:
-            lines.append("        models:")
-            for model in provider.models:
-                lines.append(f"          - id: {_yaml_scalar(model.model_id)}")
-                lines.append(f"            name: {_yaml_scalar(model.display_name)}")
-                lines.append(f"            contextWindow: {int(model.context_window_tokens)}")
-                lines.append(f"            maxTokens: {int(model.max_output_tokens)}")
-                lines.append("            input: [text]")
-                # dsh's schema is a map from thinking level to the wire value
-                # dispatch should send, not a list; the identity mapping sends
-                # the level name itself, which every supported protocol accepts.
-                efforts = {effort: effort for effort in model.reasoning_efforts if effort != "none"}
-                if efforts:
-                    rendered = ", ".join(
-                        f"{_yaml_scalar(level)}: {_yaml_scalar(wire)}"
-                        for level, wire in efforts.items()
-                    )
-                    lines.append(f"            reasoningEfforts: {{{rendered}}}")
-    return lines if len(lines) > 4 else []
-
-
-def write_dsh_profile_patch(patch_path: Path, providers: tuple[CustomProvider, ...]) -> bool:
-    """Rewrite the headless profile's user patch layer with the providers.
-
-    The patch file belongs to the harness (a fresh sandbox carries only the
-    shipped empty layer), so it is regenerated wholesale on every prepare —
-    unlike the Codex and Pi writers, which merge into files a login flow may
-    also write.
-    """
-    entries = dsh_profile_patch_entries(providers)
-    if not entries:
-        return False
-    patch_path.parent.mkdir(parents=True, exist_ok=True)
-    body = "\n".join(entries) + "\n"
-    if patch_path.exists() and patch_path.read_text() == body:
-        return False
-    patch_path.write_text(body)
-    return True
-
-
-def dsh_model_selection_patch(
-    provider_key: str, model_id: str, reasoning_effort: str | None
-) -> str:
-    """The per-turn ``--patch`` overlay selecting the model on ``dsh``.
-
-    ``agent-default-model`` is the headless profile's only model selector, so
-    each turn's spawn overlays it with the routed provider and model. The
-    effort ids are pi-ai's, where the registry's ``none`` maps to ``off``.
-    """
-    effort = "off" if reasoning_effort == "none" else reasoning_effort
-    lines = [
-        "- id: agent-default-model",
-        "  config:",
-        f"    provider: {_yaml_scalar(provider_key)}",
-        f"    model: {_yaml_scalar(model_id)}",
-    ]
-    if effort:
-        lines.append(f"    reasoningEffort: {_yaml_scalar(effort)}")
-    return "\n".join(lines) + "\n"
 
 
 # --- zcode (personal provider config) -----------------------------------------

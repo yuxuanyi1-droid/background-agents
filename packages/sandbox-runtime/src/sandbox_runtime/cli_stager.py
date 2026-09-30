@@ -1,4 +1,4 @@
-"""Supervisor half of the subprocess CLI harnesses (Codex, Pi, dsh, ZCode).
+"""Supervisor half of the subprocess CLI harnesses (Codex, Pi, ZCode).
 
 Like ``ClaudeStager``, there is no resident vendor process: every turn is a
 fresh child spawned by the bridge. ``start()`` only prepares what the child

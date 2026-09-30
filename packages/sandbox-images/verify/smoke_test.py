@@ -245,7 +245,6 @@ def observed_tool_version(command: str, expected: str, output: str) -> str:
         "pnpm": r"",
         "codex": r"codex-cli\s+",
         "pi": r"",
-        "dsh": r"",
         "zcode": r"",
         "agent-browser": r"agent-browser\s+",
         "code-server": r"",
@@ -254,14 +253,7 @@ def observed_tool_version(command: str, expected: str, output: str) -> str:
     }
     # ttyd's pinned release appends its source commit, not a prerelease label.
     suffix = r"(?:-[a-f0-9]{7,40})?" if command == "ttyd" else ""
-    # The capture allows an npm prerelease suffix so dsh's pinned rc compares
-    # exactly; a stray prerelease on any other tool still mismatches.
-    pattern = (
-        prefixes[command]
-        + r"(\d+(?:\.\d+){2,3}(?:-(?:alpha|beta|rc)\.\d+)?)"
-        + suffix
-        + r"(?=\s|$)"
-    )
+    pattern = prefixes[command] + r"(\d+(?:\.\d+){2,3})" + suffix + r"(?=\s|$)"
     matches = [
         match.group(1) for line in output.splitlines() if (match := re.match(pattern, line.strip()))
     ]
@@ -280,7 +272,6 @@ def inspect_image(plan: dict[str, Any], tools: dict[str, Any], *, services: bool
         ("pnpm", tools["pnpm"]),
         ("codex", tools["codex"]),
         ("pi", tools["pi"]),
-        ("dsh", tools["dsh"]),
         ("zcode", tools["zcodeCli"]),
         ("agent-browser", tools["agentBrowser"]),
         ("code-server", tools["codeServer"]["version"]),

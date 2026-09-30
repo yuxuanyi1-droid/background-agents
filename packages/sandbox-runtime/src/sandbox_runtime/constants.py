@@ -68,7 +68,7 @@ BRIDGE_FATAL_ERROR_FILE_PATH = "/tmp/oi-bridge-fatal-error.txt"
 # Supervisor → bridge handoff for the Claude harness (workdir, config dir, MCP servers).
 CLAUDE_HARNESS_FILE_PATH = "/tmp/oi-claude-harness.json"
 # Supervisor → bridge handoff for the subprocess CLI harnesses (Codex, Pi,
-# DeepSeek Harness, ZCode): the workdir and whether a repository is checked out.
+# ZCode): the workdir and whether a repository is checked out.
 CLI_HARNESS_FILE_PATH = "/tmp/oi-cli-harness.json"
 
 # Canonical repository manifest written by the supervisor before any child

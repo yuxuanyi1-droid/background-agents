@@ -21,7 +21,6 @@ def update_locks(root: Path, *, check: bool = False) -> None:
             "@opencode-ai/plugin": tools["opencode"],
             "@openai/codex": tools["codex"],
             "@earendil-works/pi-coding-agent": tools["pi"],
-            "@deepseek-ai/dsh": tools["dsh"],
             "zod": tools["zod"],
             "pnpm": tools["pnpm"],
             "bun": tools["bun"],

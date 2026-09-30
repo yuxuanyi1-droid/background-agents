@@ -32,7 +32,6 @@
   "opencodeMinimumReason": "Earlier releases order turns by wrapped message IDs rather than creation time.",
   "codex": "0.159.0",
   "pi": "0.87.1",
-  "dsh": "0.1.7-rc.2",
   "zcode": "3.14.3",
   "zcodeSha256": "5027f049dccb81fc3eec18aa5f089c5566adae03b9f98e21e1a6405b4f280f1c",
   "zcodeCli": "0.16.9",

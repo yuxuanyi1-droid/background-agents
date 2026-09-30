@@ -80,10 +80,6 @@ def validate_toolchain(tools: dict[str, Any]) -> None:
         raise ValueError("OpenCode is below the image toolchain minimum")
     for name in ("agentBrowser", "pnpm", "bun", "zod", "python", "codex", "pi"):
         version(tools[name])
-    # DeepSeek Harness ships only prerelease npm tags; its pin carries the
-    # official prerelease suffix and is the one tool allowed to.
-    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+){2,3}-(?:alpha|beta|rc)\.\d+", tools.get("dsh", "")):
-        raise ValueError(f"DeepSeek Harness must pin an official prerelease: {tools.get('dsh')}")
     # ZCode has no npm distribution: its CLI is built from a SHA-pinned source
     # tarball, and the bundle reports its own package version, not the tag's.
     version(tools["zcode"])
