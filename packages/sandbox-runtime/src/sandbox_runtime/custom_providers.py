@@ -11,9 +11,9 @@ Three consumers:
 - The Claude harness resolves an Anthropic-protocol provider for a model ID
   and derives the child's ``ANTHROPIC_*`` credential environment
   (``harness.claude``)
-- The Codex harness resolves an OpenAI-protocol provider for a model ID and
-  writes a ``[model_providers.*]`` entry plus a model catalog into the CLI's
-  ``config.toml`` and ``~/.codex`` (``harness.cli_vendors``)
+- The CLI harnesses write vendor config files — Codex a ``[model_providers.*]``
+  entry plus a model catalog in ``~/.codex``, Pi a ``models.json``, dsh a
+  profile patch, ZCode a personal provider config (``harness.cli_vendors``)
 """
 
 from __future__ import annotations
@@ -437,7 +437,7 @@ _PI_API_BY_PROTOCOL = {
 }
 
 
-def pi_models_document(providers: tuple[CustomProvider, ...]) -> dict:
+def pi_models_document(providers: tuple[CustomProvider, ...]) -> dict[str, Any]:
     """The ``~/.pi/agent/models.json`` document registering every provider.
 
     Pi (via pi-ai) appends the wire path itself — the Anthropic implementation
@@ -447,7 +447,7 @@ def pi_models_document(providers: tuple[CustomProvider, ...]) -> dict:
     from the provider's env var, which the supervisor's environment already
     carries.
     """
-    document: dict = {"providers": {}}
+    document: dict[str, Any] = {"providers": {}}
     for provider in providers:
         api = _PI_API_BY_PROTOCOL.get(provider.protocol)
         if api is None:
@@ -476,7 +476,7 @@ def write_pi_models_json(config_path: Path, providers: tuple[CustomProvider, ...
     if not document["providers"]:
         return False
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    existing: dict = {}
+    existing: dict[str, Any] = {}
     if config_path.exists():
         try:
             parsed = json.loads(config_path.read_text())
@@ -592,3 +592,179 @@ def dsh_model_selection_patch(
     if effort:
         lines.append(f"    reasoningEffort: {_yaml_scalar(effort)}")
     return "\n".join(lines) + "\n"
+
+
+# --- zcode (personal provider config) -----------------------------------------
+
+_ZCODE_API_BY_PROTOCOL = {
+    "anthropic": "anthropic-messages",
+    "openai_compatible": "openai-chat-completions",
+    "openai_responses": "openai-responses",
+}
+
+# The levels the CLI's own fallback model rule offers; a model without
+# declared efforts selects from these instead of the registry's list.
+_ZCODE_DEFAULT_REASONING_LEVELS = ("disabled", "enabled")
+
+
+def zcode_provider_config_path(home: Path | None = None) -> Path:
+    """Location of the generated personal provider config file."""
+    return (home if home is not None else Path.home()) / ".zcode" / "v2" / "provider_config.json"
+
+
+def _zcode_reasoning_levels(model: CustomModelEntry) -> list[str] | None:
+    """The zcode level names a model's registry efforts become, if any.
+
+    The registry's ``none`` marks a gateway that accepts disabling reasoning —
+    zcode's own name for that state is ``disabled`` — while every other level
+    passes through by name: the CLI's per-protocol wire maps forward unknown
+    level names as the wire effort value.
+    """
+    levels = [effort for effort in model.reasoning_efforts if effort != "none"]
+    return ["disabled", *levels] if levels else None
+
+
+def zcode_provider_config_document(providers: tuple[CustomProvider, ...]) -> dict[str, Any]:
+    """The ``~/.zcode/v2/provider_config.json`` document registering every provider.
+
+    ZCode has no environment seam for endpoints or credentials — the api-key
+    rides the file as a literal, the one place the CLI reads it from — and its
+    base URL convention follows the client: Anthropic gateways at their API
+    root (the client appends ``/v1/messages``), OpenAI gateways with whatever
+    version segment they registered. Model sizes ride sparse "smart" rules so
+    the CLI's bundled per-protocol wire mappings keep applying underneath.
+    """
+    provider_rules: list[dict[str, Any]] = []
+    model_rules: list[dict[str, Any]] = []
+    for provider in providers:
+        api_type = _ZCODE_API_BY_PROTOCOL.get(provider.protocol)
+        if api_type is None:
+            continue
+        api: dict[str, Any] = {
+            "type": api_type,
+            "baseUrl": (
+                anthropic_root_base_url(provider.base_url)
+                if provider.is_anthropic_protocol
+                else provider.base_url
+            ),
+        }
+        if provider.headers:
+            api["headers"] = dict(provider.headers)
+        provider_rules.append(
+            {
+                "providerId": provider.provider_key,
+                "providerName": provider.provider_key,
+                "enabled": True,
+                "config": {
+                    "group": "standard-personal",
+                    "access": {"type": "api-key", "apiKey": provider.api_key},
+                    "api": api,
+                    "personalModelIds": [model.model_id for model in provider.models],
+                    "visibility": "visible",
+                },
+            }
+        )
+        for model in provider.models:
+            option_specs: dict[str, Any] = {"maxOutputTokens": {"max": model.max_output_tokens}}
+            levels = _zcode_reasoning_levels(model)
+            if levels is not None:
+                option_specs["reasoningLevel"] = {"values": levels}
+            model_rules.append(
+                {
+                    "providerId": provider.provider_key,
+                    "modelId": model.model_id,
+                    "config": {
+                        "properties": {"contextWindow": model.context_window_tokens},
+                        "optionSpecs": option_specs,
+                    },
+                }
+            )
+    return {
+        "schemaVersion": 1,
+        "config": {
+            "providerConfigRules": {"providerRules": provider_rules},
+            "modelConfigRules": {
+                "providerModelRules": model_rules,
+                "manualProviderModelRules": [],
+            },
+        },
+    }
+
+
+def write_zcode_provider_config(config_path: Path, providers: tuple[CustomProvider, ...]) -> bool:
+    """Write the personal provider config, replacing any earlier generated one.
+
+    The file belongs to the harness — the CLI never writes it, a fresh sandbox
+    ships without one — so it regenerates wholesale on every prepare, unlike
+    the Codex and Pi writers, which merge into files a login flow may touch.
+    """
+    document = zcode_provider_config_document(providers)
+    if not document["config"]["providerConfigRules"]["providerRules"]:
+        return False
+    body = json.dumps(document, indent=2) + "\n"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    if config_path.exists() and config_path.read_text() == body:
+        return False
+    config_path.write_text(body)
+    return True
+
+
+def zcode_model_selection(
+    provider: CustomProvider, model: CustomModelEntry, reasoning_effort: str | None
+) -> dict[str, Any]:
+    """The ``defaultModelSelection`` entry routing one turn's model.
+
+    The CLI reads its model from this field, so each turn rewrites it before
+    the spawn. The level must be one the model declares: the registry's
+    ``none`` maps to zcode's ``disabled``, an explicit effort passes through,
+    and an unspecified one takes the highest declared level — the same choice
+    the CLI itself makes for a fresh selection.
+    """
+    if reasoning_effort == "none":
+        level = "disabled"
+    elif reasoning_effort:
+        level = reasoning_effort
+    else:
+        level = (_zcode_reasoning_levels(model) or list(_ZCODE_DEFAULT_REASONING_LEVELS))[-1]
+    return {
+        "providerId": provider.provider_key,
+        "modelId": model.model_id,
+        "options": {"reasoningLevel": level},
+    }
+
+
+def write_zcode_model_selection(
+    config_path: Path,
+    providers: tuple[CustomProvider, ...],
+    model: str,
+    reasoning_effort: str | None,
+) -> bool:
+    """Point the config file's ``defaultModelSelection`` at the routed model.
+
+    Reads the document the prepare step wrote and swaps only the selection, so
+    a missing or unreadable file regenerates from the manifest rather than
+    sending the turn at the CLI's own default model.
+    """
+    resolved = find_provider_for_model(model, providers)
+    if resolved is None:
+        return False
+    selection = zcode_model_selection(*resolved, reasoning_effort)
+    document: dict[str, Any] | None = None
+    if config_path.exists():
+        try:
+            parsed = json.loads(config_path.read_text())
+            document = parsed if isinstance(parsed, dict) else None
+        except ValueError:
+            document = None
+    if document is None:
+        document = zcode_provider_config_document(providers)
+    config = document.get("config")
+    if not isinstance(config, dict):
+        config = {}
+        document["config"] = config
+    if config.get("defaultModelSelection") == selection:
+        return False
+    config["defaultModelSelection"] = selection
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(document, indent=2) + "\n")
+    return True

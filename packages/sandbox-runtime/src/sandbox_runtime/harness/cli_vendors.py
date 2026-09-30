@@ -26,10 +26,14 @@ from typing import TYPE_CHECKING, Any
 from ..custom_providers import (
     codex_model_catalog_path,
     dsh_model_selection_patch,
+    load_custom_providers,
     write_codex_model_catalog,
     write_codex_model_providers,
     write_dsh_profile_patch,
     write_pi_models_json,
+    write_zcode_model_selection,
+    write_zcode_provider_config,
+    zcode_provider_config_path,
 )
 from .base import HarnessId, TurnOutcome
 from .cli_harness import (
@@ -460,12 +464,15 @@ class ZcodeVendor:
     """ZCode CLI (``zcode --prompt``), text output only.
 
     Verified against the v3.14.3 source build: ``--prompt`` runs one headless
-    turn (permission mode defaults to ``yolo`` under it, so no approvals),
-    ``--json`` emits nothing for ``--prompt``, and auth has no environment
-    variable — credentials come from ZCode's own login/credential store, so an
-    API-key session needs that store staged before the first turn. A session
-    id is never captured today (the plain-text stream does not carry one), so
-    ``--resume`` stays unwired and every turn is a fresh conversation.
+    turn (permission mode defaults to ``yolo`` under it, so no approvals) and
+    ``--json`` emits nothing for ``--prompt``. Custom providers ride the CLI's
+    personal provider config — ZCode offers no environment seam for endpoints
+    or keys, so unlike the other vendors the api-key rides the file as a
+    literal. The CLI reads its model from the same file's
+    ``defaultModelSelection``, so each turn rewrites that field before the
+    spawn (the per-turn seam the dsh vendor solves with a patch overlay). A
+    session id is never captured today (the plain-text stream does not carry
+    one), so ``--resume`` stays unwired and every turn is a fresh conversation.
     """
 
     id = HarnessId.ZCODE
@@ -486,6 +493,10 @@ class ZcodeVendor:
         model_provider: str | None = None,
     ) -> list[str]:
         argv = ["--prompt", prompt_text]
+        if model_provider and model:
+            write_zcode_model_selection(
+                zcode_provider_config_path(), load_custom_providers(), model, reasoning_effort
+            )
         if session_id:
             argv += ["--resume", session_id]
         return argv
@@ -494,7 +505,8 @@ class ZcodeVendor:
         return {}
 
     def prepare(self, custom_providers: tuple[CustomProvider, ...]) -> None:
-        return None
+        """Register the providers in the CLI's personal provider config."""
+        write_zcode_provider_config(zcode_provider_config_path(), custom_providers)
 
     def parse_record(self, record: dict[str, Any], state: CliTurnState) -> list[Any]:
         return []

@@ -393,3 +393,74 @@ class TestZcode:
         )
         assert resumed == ["--prompt", "continue", "--resume", "sess_1"]
         assert vendor.initial_session_id() is None
+
+    def _stage_custom_provider(self, tmp_path, monkeypatch) -> None:
+        manifest = {
+            "id": "0011223344556677889900aabbccddee",
+            "providerKey": "cpa-00112233",
+            "protocol": "anthropic",
+            "baseUrl": "https://gateway.example/api/anthropic",
+            "headers": [],
+            "apiKeyEnv": "CP_00112233_API_KEY",
+            "models": [
+                {
+                    "modelId": "glm-4.7",
+                    "displayName": "GLM 4.7",
+                    "reasoningEfforts": ["high"],
+                    "contextWindowTokens": 200_000,
+                    "maxOutputTokens": 32_768,
+                }
+            ],
+        }
+        monkeypatch.setenv("CUSTOM_MODEL_PROVIDERS", json.dumps([manifest]))
+        monkeypatch.setenv("CP_00112233_API_KEY", "sk-a")
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+    def test_prepare_writes_personal_provider_config(self, tmp_path, monkeypatch) -> None:
+        self._stage_custom_provider(tmp_path, monkeypatch)
+
+        ZcodeVendor().prepare(load_custom_providers())
+
+        config = tmp_path / ".zcode" / "v2" / "provider_config.json"
+        document = json.loads(config.read_text())
+        rule = document["config"]["providerConfigRules"]["providerRules"][0]
+        assert rule["providerId"] == "cpa-00112233"
+        assert rule["config"]["api"]["baseUrl"] == "https://gateway.example/api/anthropic"
+        # ZCode has no environment seam for credentials, so the key rides the
+        # file itself.
+        assert rule["config"]["access"]["apiKey"] == "sk-a"
+        assert "defaultModelSelection" not in document["config"]
+
+    def test_custom_model_turn_routes_via_default_model_selection(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        self._stage_custom_provider(tmp_path, monkeypatch)
+        vendor = ZcodeVendor()
+        vendor.prepare(load_custom_providers())
+        config = tmp_path / ".zcode" / "v2" / "provider_config.json"
+
+        argv = vendor.build_argv(
+            session_id=None,
+            prompt_text="build it",
+            model="cpa-00112233/glm-4.7",
+            reasoning_effort="high",
+            workdir=WORKDIR,
+            model_provider="cpa-00112233",
+        )
+        assert argv == ["--prompt", "build it"]
+        selection = json.loads(config.read_text())["config"]["defaultModelSelection"]
+        assert selection == {
+            "providerId": "cpa-00112233",
+            "modelId": "glm-4.7",
+            "options": {"reasoningLevel": "high"},
+        }
+
+        # An official-model turn carries no routing and leaves the file alone.
+        assert vendor.build_argv(
+            session_id=None,
+            prompt_text="again",
+            model="zai-coding-plan/glm-5.3",
+            reasoning_effort=None,
+            workdir=WORKDIR,
+        ) == ["--prompt", "again"]
+        assert json.loads(config.read_text())["config"]["defaultModelSelection"] == selection

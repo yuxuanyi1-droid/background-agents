@@ -110,7 +110,7 @@ export const HARNESS_CATALOG = {
   },
   zcode: {
     label: "ZCode",
-    modelFamilies: ["zai-coding-plan"],
+    modelFamilies: ["zai-coding-plan", "custom-anthropic", "custom-openai"],
     providerAuth: {
       "zai-coding-plan": ["api_key"],
     },

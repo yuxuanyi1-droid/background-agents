@@ -57,6 +57,7 @@ describe("harnessSupportsModel", () => {
     expect(harnessSupportsModel("dsh", "deepseek/deepseek-v4-pro")).toBe(true);
     expect(harnessSupportsModel("dsh", "openai/gpt-5.5")).toBe(false);
     expect(harnessSupportsModel("zcode", "zai-coding-plan/glm-5.3")).toBe(true);
+    expect(harnessSupportsModel("zcode", "cpa-00112233/glm-4.7")).toBe(true);
     expect(harnessSupportsModel("zcode", "openai/gpt-5.5")).toBe(false);
   });
 
@@ -216,9 +217,10 @@ describe("harnessSupportsCustomModel", () => {
     }
   });
 
-  it("keeps zcode on its static family until its runtime support lands", () => {
-    expect(harnessSupportsCustomModel("zcode", "cpo-99887766/glm-5.3", "openai_responses")).toBe(
-      false
-    );
+  it("runs every custom protocol on zcode", () => {
+    for (const protocol of ["anthropic", "openai_compatible", "openai_responses"] as const) {
+      expect(harnessSupportsCustomModel("zcode", "cpo-99887766/glm-5.3", protocol)).toBe(true);
+      expect(harnessSupportsCustomModel("zcode", "cpa-00112233/glm-5.3", protocol)).toBe(true);
+    }
   });
 });

@@ -88,126 +88,155 @@ token（**权限不全**：缺 KV/D1/Queues 写，Workers 部署会被卡）；t
 **已就绪**：
 
 - Docker 29 + Compose v5.5（官方源安装）；宿主机 Node v24.11.0（/usr/local，官方 tarball）
-- 根目录 `.env`：全新生成的一套部署密钥（三把加密 key、BROWSER_AUTH_SECRET、四个
-  SERVICE_AUTH_SECRET、对象存储口令），GitHub App 的 id/installation/bot 用户名已按已知值预填，
-  凭据本体留 `TODO(user)` 标记。SANDBOX_PROVIDER 已设 e2b
-- compose 栈运行中且全绿：app（127.0.0.1:8787）+ SeaweedFS（127.0.0.1:9000）+ Litestream
-  （86 迁移、cron/闹钟/轮询 running、首快照已入备份桶）
-- **web 已容器化加入栈**（新文件，未提交）：`packages/web/Dockerfile`（standalone 输出，
-  NEXT_PUBLIC_WS_URL 作 build arg）+ `docker-compose.web.yml` overlay（web 走
-  127.0.0.1:3000，服务端经 compose 网络访问 app:8787）。`.dockerignore` 白名单放行
-  packages/web/ 并排除其 .env*/.next。启动：
+- 根目录
+  `.env`：全新生成的一套部署密钥（三把加密 key、BROWSER_AUTH_SECRET、四个 SERVICE_AUTH_SECRET、对象存储口令），GitHub
+  App 的 id/installation/bot 用户名已按已知值预填，凭据本体留 `TODO(user)`
+  标记。SANDBOX_PROVIDER 已设 e2b
+- compose 栈运行中且全绿：app（127.0.0.1:8787）+ SeaweedFS（127.0.0.1:9000）+
+  Litestream（86 迁移、cron/闹钟/轮询 running、首快照已入备份桶）
+- **web 已容器化加入栈**（新文件，未提交）：`packages/web/Dockerfile`（standalone 输出，NEXT_PUBLIC_WS_URL 作 build
+  arg）+ `docker-compose.web.yml`
+  overlay（web 走 127.0.0.1:3000，服务端经 compose 网络访问 app:8787）。`.dockerignore`
+  白名单放行 packages/web/ 并排除其 .env\*/.next。启动：
   `docker compose -f docker-compose.yml -f docker-compose.web.yml up -d`
-- Dockerfile 坑：`next build` 类型检查会扫到 import eslint 的 co-located
-  测试，而 eslint 是仓库根 devDependency——workspace 定向安装需补 `npm install --no-save
-  eslint@^9.18.0`
+- Dockerfile 坑：`next build` 类型检查会扫到 import
+  eslint 的 co-located 测试，而 eslint 是仓库根 devDependency——workspace 定向安装需补
+  `npm install --no-save eslint@^9.18.0`
 - compose smoke 端到端通过（会话往返/附件/WS 令牌/沙箱回复/cron/复制/排水/缺密钥报错全 ok）
 
-**公网接入（2026-09-29 全链路已通）**：`https://sso.qinyuan.cloud:8443`（前置机
-`43.161.245.204` 终止 TLS）路径分流——`/sessions/*` → 本机 `http://39.109.109.53:8787`（CP
-浏览器 WS，已验证 404 行为与直连 CP 一致），其余 → 本机 `http://39.109.109.53:8123`（web，
-已验证登录页 200）。`.env` 三 URL 就位、web 镜像已重建（wss 地址内联确认）、8787 公网可达
-（沙箱直连，E2B 海外→国内连通性待真实会话验证）。
-**防火墙：已按用户决定整体移除**（原 DOCKER-USER 限源规则在 iptables-nft 后端上源豁免
-未生效导致前置机 SYN 被误杀，删除后即通；持久化已重存）。因此 8123 目前对公网明文可达，
-如需收紧应去**阿里云安全组**把 8123/TCP 限源 43.161.245.204（云边缘层，无宿主机 netfilter
-的怪异行为）。
+**公网接入（2026-09-29 全链路已通）**：`https://sso.qinyuan.cloud:8443`（前置机 `43.161.245.204`
+终止 TLS）路径分流——`/sessions/*` → 本机
+`http://39.109.109.53:8787`（CP 浏览器 WS，已验证 404 行为与直连 CP 一致），其余 → 本机
+`http://39.109.109.53:8123`（web，已验证登录页 200）。`.env`
+三 URL 就位、web 镜像已重建（wss 地址内联确认）、8787 公网可达（沙箱直连，E2B 海外→国内连通性待真实会话验证）。
+**防火墙：已按用户决定整体移除**（原 DOCKER-USER 限源规则在 iptables-nft 后端上源豁免未生效导致前置机 SYN 被误杀，删除后即通；持久化已重存）。因此 8123 目前对公网明文可达，如需收紧应去**阿里云安全组**把 8123/TCP 限源 43.161.245.204（云边缘层，无宿主机 netfilter 的怪异行为）。
 
 **E2B 沙箱不回连的根因（2026-09-29 已定位，待用户加前置机端口后修复）**：沙箱运行时
 `sandbox_runtime/runtime_config.py` 的 `_validate_control_plane_url` 只放行 `https://*` 或
-`http://localhost|127.0.0.1|::1`——`WORKER_URL=http://39.109.109.53:8787` 导致 entrypoint
-启动即抛 ValueError 崩溃（supervisor 日志 /tmp/oi-supervisor.log），bridge 永不连接，240s
-`sandbox.connecting_timeout`。网络本身全通（已验证：沙箱→本机 8787 直连 RTT ~135ms；
-沙箱→前置机 TLS→8787/8123 双路径 marker 均到达）。WSL2 时代能用是因为 WORKER_URL 是
-cloudflared 的 https 隧道。**修复**：前置机加 8444(TLS) 全路径裸转发到
-`http://39.109.109.53:8787`，然后本机 .env 改 `WORKER_URL=https://sso.qinyuan.cloud:8444`
-并 `up -d --force-recreate`（web 镜像无需重建）。诊断手法记录：envd 在
-`https://49983-<sandboxID>.e2b.app/process.Process/Start`（Connect 信封：1 flag 字节+4 字节
-BE 长度+JSON，头 X-Access-Token；create 时传 secure:true 拿 token、envVars 随 create 下发）；
-进程输出读不回，用"结果编码进 URL + 本机 tcpdump -A"当回传通道。
+`http://localhost|127.0.0.1|::1`——`WORKER_URL=http://39.109.109.53:8787`
+导致 entrypoint 启动即抛 ValueError 崩溃（supervisor 日志 /tmp/oi-supervisor.log），bridge 永不连接，240s
+`sandbox.connecting_timeout`。网络本身全通（已验证：沙箱→本机 8787 直连 RTT
+~135ms；沙箱→前置机 TLS→8787/8123 双路径 marker 均到达）。WSL2 时代能用是因为 WORKER_URL 是 cloudflared 的 https 隧道。**修复**：前置机加 8444(TLS) 全路径裸转发到
+`http://39.109.109.53:8787`，然后本机 .env 改 `WORKER_URL=https://sso.qinyuan.cloud:8444` 并
+`up -d --force-recreate`（web 镜像无需重建）。诊断手法记录：envd 在
+`https://49983-<sandboxID>.e2b.app/process.Process/Start`（Connect 信封：1
+flag 字节+4 字节 BE 长度+JSON，头 X-Access-Token；create 时传 secure:true 拿 token、envVars 随 create 下发）；进程输出读不回，用"结果编码进 URL + 本机 tcpdump
+-A"当回传通道。
 
 **自定义模型思考等级修复（2026-09-29 已上线）**：根因是推理配置只查静态目录
 `MODEL_REASONING_CONFIG`，cpa-/cpo- 模型查不到 → web 无 Effort 子菜单、控制面
 `validateReasoningEffort` 把值当无效丢弃。修复三层：shared 新增
-`customModelReasoningConfig(efforts)`（从注册表 efforts 建配置，过滤 "none"、按严重度排序、
-默认优先 high）+ `isValidReasoningEffort` 增加注册表参数 + `ModelDisplayInfo.reasoningEfforts`；
-web 在 `use-enabled-models` 的 custom items 里带 efforts，选择器/`resolveModelPreference`/
+`customModelReasoningConfig(efforts)`（从注册表 efforts 建配置，过滤 "none"、按严重度排序、默认优先 high）+
+`isValidReasoningEffort` 增加注册表参数 + `ModelDisplayInfo.reasoningEfforts`；web 在
+`use-enabled-models` 的 custom items 里带 efforts，选择器/`resolveModelPreference`/
 `defaultReasoningEffort` 回退到它；控制面 `validateReasoningEffort` 加 customEfforts 参数，
 `SessionMessageQueue`/`SessionInitHandler` 注入 `getCustomModelReasoningEfforts`（惰性查
-`CustomProviderStore.resolveCustomModel`，components.ts 一处闭包两处复用）。沙箱侧本就把
-effort 透传给 harness，无需重建模板。测试：shared 1061 / web 1990 / CP 5317 全过，镜像已重建
-上线。注意：菜单里显示的等级来自导入模型时存的 reasoningEfforts（如 glm-5.3 =
+`CustomProviderStore.resolveCustomModel`，components.ts 一处闭包两处复用）。沙箱侧本就把 effort 透传给 harness，无需重建模板。测试：shared
+1061 / web 1990 / CP
+5317 全过，镜像已重建上线。注意：菜单里显示的等级来自导入模型时存的 reasoningEfforts（如 glm-5.3 =
 ["xhigh","max","high"]），在设置页可改。
 
 **pi/dsh 自定义 provider 支持（2026-09-29 已上线，E2B 模板 f3852b09ddf1）**：
-- **pi**：`prepare()` 把 provider 写进 `~/.pi/agent/models.json`（`{providers:{key:{baseUrl,api,apiKey:"$ENV",models:[{id}]}}}`；api 映射 anthropic→anthropic-messages / openai_compatible→openai-completions / openai_responses→openai-responses；URL 约定与 codex 相同）。模型串 `{key}/{model}` 与既有 `--model` 直通；`--thinking` 的 none→off 映射。已在新模板验证 `pi --list-models` 列出 cpo 模型。
-- **dsh**：`prepare()` 写 `~/.dsh/profiles/headless/cordis.patch.yml`（`- id: llm-pi-ai` config.providers.{key}：displayName/api/baseURL/apiKeyEnv/models{id,name,contextWindow,maxTokens,input,reasoningEfforts}）；每回合 `build_argv` 写 `/tmp/oi-dsh-model-selection.yml`（`- id: agent-default-model` 的 provider/model/reasoningEffort，none→off）并以 `--patch` 注入。凭据：apiKeyEnv 直接解析同名环境变量（"store through credentials service or export it"），无需写 .credentials.yaml。
-- **门控**：shared 新增 `customProviderProtocols` 能力 + `harnessSupportsCustomModel(harness, model, protocol?)`（模型串不含协议——两个 OpenAI 线协议共用 cpo- 前缀，需注册表元数据）；**codex 仅 openai_responses**（用户定），pi 保持 any，**dsh 族放开 custom-anthropic/custom-openai**，zcode 暂不动（族仍 zai-only）。web `ModelDisplayInfo.protocol` 随选项传递，`filterModelOptionsForHarness` 走新 helper；CP 侧 checkHarnessCompatibility 保持串级（无协议信息，宽松）。
-- 测试：python 1447 / shared 1063 / web 1986 全过；E2B 模板重建（uv 装在 ~/.local/bin，构建需 PATH 含它）并切换 `open-inspect-sandbox-f3852b09ddf1-1790705766787503573`。
-- **zcode 未完成（下一轮）**：研究到 80%——支持 anthropic-messages/openai-chat-completions/openai-responses 三协议，provider 声明在 `~/.zcode/v2/provider_config.json`（access:{type:"api-key",apiKey} + api:{type,baseUrl,headers}，源码 /opt/openinspect/zcode/packages/provider/src/config/provider-data-schema.ts），模型选择 defaultModelSelection（modelSelectionSchema 在 packages/shared/src/model-selection.ts）。剩余：文件顶层 JSON 结构、--prompt 怎么选模型、凭据文件格式（resolveCredentialFilePath）。完成后放开 zcode 族即可。
-- **诊断通道（复用）**：envd Connect 信封流**直接带 stdout**（base64 event.data.stdout），`49983-{id}.e2b.app/process.Process/Start` 起 `/opt/openinspect/python/bin/python -c` 即得输出，不再需要 URL 回传。
 
-**会话创建丢失思考等级修复（2026-09-29 二次上线）**：症状=创建时选 max，进会话变 high。
-根因：`routes/session-create.ts` 建会话路由层裸调 `isValidReasoningEffort(model, effort)`（无注册表
-参数）→ 自定义模型一律 false → 存 null → 进会话回退到模型默认（启发式优先 high）。上次只修了
-session-init/message-queue，漏了这第三道闸门。本轮以 `grep isValidReasoningEffort` 拉全所有闸门
-并全部修掉：新增 `routes/custom-model-efforts.ts` helper（惰性查注册表，失败降级静态判定），
-接入 session-create、session-child-spawn（拒绝信息也带上注册表等级）、automation-crud（create+update，
-resolveReasoningEffort 加 customEfforts 参数）、integration-settings（github/linear 读取路径）、web
-automations 表单（automation-form-policy + customModelEfforts helper）。未动的：slack/linear-bot 包
-（CF 侧独立部署，本栈不跑）。测试 CP 5317 / web 1986 全过，镜像已重建上线。**回归验证方法**：建会话
-选 max → 重进会话应仍显示 max；查库 `sessions/<id>.db` 的 session 行 reasoning_effort 应为 max。
+- **pi**：`prepare()` 把 provider 写进
+  `~/.pi/agent/models.json`（`{providers:{key:{baseUrl,api,apiKey:"$ENV",models:[{id}]}}}`；api 映射 anthropic→anthropic-messages
+  / openai_compatible→openai-completions /
+  openai_responses→openai-responses；URL 约定与 codex 相同）。模型串 `{key}/{model}` 与既有
+  `--model` 直通；`--thinking` 的 none→off 映射。已在新模板验证 `pi --list-models` 列出 cpo 模型。
+- **dsh**：`prepare()` 写 `~/.dsh/profiles/headless/cordis.patch.yml`（`- id: llm-pi-ai`
+  config.providers.{key}：displayName/api/baseURL/apiKeyEnv/models{id,name,contextWindow,maxTokens,input,reasoningEfforts}）；每回合
+  `build_argv` 写 `/tmp/oi-dsh-model-selection.yml`（`- id: agent-default-model`
+  的 provider/model/reasoningEffort，none→off）并以 `--patch`
+  注入。凭据：apiKeyEnv 直接解析同名环境变量（"store through credentials service or export
+  it"），无需写 .credentials.yaml。
+- **门控**：shared 新增 `customProviderProtocols` 能力 +
+  `harnessSupportsCustomModel(harness, model, protocol?)`（模型串不含协议——两个 OpenAI 线协议共用 cpo- 前缀，需注册表元数据）；**codex 仅 openai_responses**（用户定），pi 保持 any，**dsh 族放开 custom-anthropic/custom-openai**，zcode 暂不动（族仍 zai-only）。web
+  `ModelDisplayInfo.protocol` 随选项传递，`filterModelOptionsForHarness`
+  走新 helper；CP 侧 checkHarnessCompatibility 保持串级（无协议信息，宽松）。
+- 测试：python 1447 / shared 1063 / web
+  1986 全过；E2B 模板重建（uv 装在 ~/.local/bin，构建需 PATH 含它）并切换
+  `open-inspect-sandbox-f3852b09ddf1-1790705766787503573`。
+- **zcode 未完成（下一轮）**：研究到 80%——支持 anthropic-messages/openai-chat-completions/openai-responses 三协议，provider 声明在
+  `~/.zcode/v2/provider_config.json`（access:{type:"api-key",apiKey} +
+  api:{type,baseUrl,headers}，源码 /opt/openinspect/zcode/packages/provider/src/config/provider-data-schema.ts），模型选择 defaultModelSelection（modelSelectionSchema 在 packages/shared/src/model-selection.ts）。剩余：文件顶层 JSON 结构、--prompt 怎么选模型、凭据文件格式（resolveCredentialFilePath）。完成后放开 zcode 族即可。
+- **诊断通道（复用）**：envd Connect 信封流**直接带 stdout**（base64
+  event.data.stdout），`49983-{id}.e2b.app/process.Process/Start` 起
+  `/opt/openinspect/python/bin/python -c` 即得输出，不再需要 URL 回传。
+
+**会话创建丢失思考等级修复（2026-09-29 二次上线）**：症状=创建时选 max，进会话变 high。根因：`routes/session-create.ts`
+建会话路由层裸调 `isValidReasoningEffort(model, effort)`（无注册表参数）→ 自定义模型一律 false
+→ 存 null
+→ 进会话回退到模型默认（启发式优先 high）。上次只修了 session-init/message-queue，漏了这第三道闸门。本轮以
+`grep isValidReasoningEffort` 拉全所有闸门并全部修掉：新增 `routes/custom-model-efforts.ts`
+helper（惰性查注册表，失败降级静态判定），接入 session-create、session-child-spawn（拒绝信息也带上注册表等级）、automation-crud（create+update，resolveReasoningEffort 加 customEfforts 参数）、integration-settings（github/linear 读取路径）、web
+automations 表单（automation-form-policy + customModelEfforts
+helper）。未动的：slack/linear-bot 包（CF 侧独立部署，本栈不跑）。测试 CP 5317 / web
+1986 全过，镜像已重建上线。**回归验证方法**：建会话选 max → 重进会话应仍显示 max；查库
+`sessions/<id>.db` 的 session 行 reasoning_effort 应为 max。
 
 **dsh reasoningEfforts 格式修复（2026-09-30 已上线，模板 0ebe7efa6091）**：dsh 的模型
-`reasoningEfforts` 不是等级数组而是 `{等级: 线上值}` 映射（仅 "off" 可留空、必须至少一个非 off
-等级）——数组格式使整个 llm-pi-ai 服务校验失败不激活（NO_ADAPTER）。已改为恒等映射
-`{"high": "high", ...}`，新模板实测：服务激活、`--patch` 选模型后回合真实到达自定义端点。
-注意实证细节：`cordis.patch.yml` 里 llm-pi-ai 的 config 覆盖生效，但 agent-default-model 的
-config 覆盖在用户层不生效（原因未深究）——每回合选模型必须走 `--patch` 叠加（vendor 已如此）。
+`reasoningEfforts` 不是等级数组而是 `{等级: 线上值}`
+映射（仅 "off" 可留空、必须至少一个非 off 等级）——数组格式使整个 llm-pi-ai 服务校验失败不激活（NO_ADAPTER）。已改为恒等映射
+`{"high": "high", ...}`，新模板实测：服务激活、`--patch`
+选模型后回合真实到达自定义端点。注意实证细节：`cordis.patch.yml`
+里 llm-pi-ai 的 config 覆盖生效，但 agent-default-model 的 config 覆盖在用户层不生效（原因未深究）——每回合选模型必须走
+`--patch` 叠加（vendor 已如此）。
 
-**zcode 结论（2026-09-30 研究完毕，实现待做）**：zcode 0.16.9 的 `--prompt` 对新会话**不做模型
-种子**——defaultModelSelection 只进 TUI 路径（tui-prompt-handler-runtime 消费），runtimeConfig
-无 modelSelection 项、CLI 无 --model 参数（AgentRuntime 从 config.modelSelection 初始化，
-prompt-command 不传）。内置 provider 做默认选择同样报 "Select a model before continuing"（已实证），
-即 vendor docstring 所指 "v3.14.3 源码构建" 的行为已随版本漂移失效。**正确路径：把 ZcodeVendor
-改造为 `zcode app-server`（ZCode Protocol stdio）驱动**——常驻进程、setModel 指令 + 回合提交，
-这也是 ZCode 官方的无头集成方式。provider 注册侧已全部探明：`~/.zcode/v2/provider_config.json`
-（`{schemaVersion:1, config:{providerConfigRules:{providerRules:{<id>:{access:{type:"api-key",apiKey},
-api:{type:"anthropic-messages"|"openai-chat-completions"|"openai-responses", baseUrl, headers?},
-personalModelIds}}}, modelConfigRules:{providerModelRules:[], manualProviderModelRules:[{providerId,
-modelId, config:{enabled, properties:{...全字段必填}, optionSpecs:{reasoningLevel:{values,map},
-maxOutputTokens:{max,map}}}}]}, defaultModelSelection}}`；map 是编译表达式字符串，恒等式
-`{"reasoning_effort": reasoningLevel}`（OpenAI 系）；文件 schema 见
-packages/provider-node/src/provider-config-file-codec.ts，字段 schema 见
-packages/provider/src/config/{provider-data-schema,model-config 由 shared/model-config}.ts，
-内置范例 /opt/openinspect/zcode/config/provider/zcode-builtin.json。
+**zcode 自定义 provider（2026-09-30 已完成）**：前一工作会话（sess
+`ee8c82bd…`）实现到一半时沙箱到达最大寿命被杀（"The sandbox reached its maximum
+lifetime"），两次"继续"均未恢复；其未提交的 16 次编辑从会话 trace 导出（web 代理路由
+`/api/sessions/:id/export` + 用户 cookie）的 tool_call 事件按时间序回放恢复（全部精确命中），随后补齐验证。方案推翻了本文件早前 "须重写为 app-server 驱动"的结论——0.16.9 的
+`--prompt` **会**把 personal 文件的 defaultModelSelection 传进会话（prompt-command.ts:221 →
+configuredDefaultModelSelection →
+runtime-config.ts:231 非\_resume 新会话初始模型），实测成立。实现：
 
-**codex wire_api=chat 移除修复（2026-09-30 已上线，模板 689f563bedb6）**：codex CLI 新版拒绝
-加载含 `wire_api = "chat"` 的 config.toml（openai/codex#7782）。写入器改为**只登记
-openai_responses 网关**（chat 协议路由到 pi/dsh），且**整体重写受管段**——先剥掉文件里所有
-`[model_providers.cp[ao]-xxxxxxxx]` 段（含历史遗留的 chat 段，否则恢复的沙箱仍拒载）再追加当前
-responses 集；`codex_wire_api()` 已删除。web 门控上一轮已是 responses-only，两侧对齐。新模板实测：
-chat 段被清除、非受管内容保留、codex exec 正常加载配置。
+- `custom_providers.py`：`write_zcode_provider_config` 整文件重写
+  `~/.zcode/v2/provider_config.json`（providerRules：access api-key
+  **明文落盘**（zcode 无 env 接缝）、api.type 三协议映射 anthropic-messages/openai-chat-completions/openai-responses、personalModelIds；providerModelRules
+  **sparse 智能规则**只叠 contextWindow/maxOutputTokens/
+  reasoningLevel.values（`["disabled", *efforts]`，registry 的 none→disabled），保留内置按协议 wire
+  map）；`write_zcode_model_selection`
+  每回合改写 defaultModelSelection（effort 直通、none→disabled、缺省取声明最高等级；文件缺失时从 manifest 重建）
+- `cli_vendors.py`：ZcodeVendor.prepare 写注册文件；build_argv 写 selection（与 dsh 的每回合
+  `--patch` 同思路的落盘方案）
+- `harnesses.ts`：zcode
+  modelFamilies 放开 custom-anthropic/custom-openai；不设 customProviderProtocols
+  = 全协议放开（同 pi；codex 仅 responses 的限制不变）
+- URL 约定：anthropic 网关写 API 根（复用 `anthropic_root_base_url`），openai 网关保留注册时的 `/v1`
+- 实测（沙箱内 zcode 0.16.9 + mock 网关）：anthropic 协议
+  `POST /v1/messages`、x-api-key生效、`thinking: adaptive`；openai_compatible
+  `POST /v1/chat/completions`、Bearer、
+  `thinking: enabled`；模型串/max_tokens/contextWindow 均按注册路由
+- 测试：python 1460 / shared 1063 / web 1987 全过，ruff + typecheck 干净
+- **生效需重建沙箱模板**（改动在 sandbox-runtime）；生效后 zcode 选择器即出现自定义模型
+
+**codex wire_api=chat 移除修复（2026-09-30 已上线，模板 689f563bedb6）**：codex CLI 新版拒绝加载含
+`wire_api = "chat"`
+的 config.toml（openai/codex#7782）。写入器改为**只登记 openai_responses 网关**（chat 协议路由到 pi/dsh），且**整体重写受管段**——先剥掉文件里所有
+`[model_providers.cp[ao]-xxxxxxxx]`
+段（含历史遗留的 chat 段，否则恢复的沙箱仍拒载）再追加当前 responses 集；`codex_wire_api()`
+已删除。web 门控上一轮已是 responses-only，两侧对齐。新模板实测：chat 段被清除、非受管内容保留、codex
+exec 正常加载配置。
 
 **剩余收尾**：
 
-1. 用户实测 dsh / pi / codex（均修后）
-2. zcode：app-server 协议驱动重写 + provider_config.json staging + 放开 zcode 模型族
+1. 用户实测 dsh / pi / codex / zcode（均修后；zcode 需先重建沙箱模板）
+2. 重建并切换 E2B 模板，使本分支 sandbox-runtime 改动（codex catalog、dsh 字段/URL 修复、zcode
+   provider 支持）在真实会话生效
 
 **owner 提权（2026-09-29 已完成）**：用户首次登录后（canonical id
 `462d0b1645a0e34d9a6eb55b16a860e3`）用仓库 `scripts/bootstrap-workspace-owner.ts` 导出的
-`buildBootstrapSql`（与正式脚本同语义：preflight → 审计+角色变更同事务 → postcondition 验证）
-对容器内 `/data/global.db` 执行（`docker exec` + `node:sqlite`，D1-only 的 CLI 走不了）。
-结果 executed、`role_builtin_owner`、audit_written=1。重装/重建后重做此步骤。
+`buildBootstrapSql`（与正式脚本同语义：preflight → 审计+角色变更同事务 →
+postcondition 验证）对容器内 `/data/global.db` 执行（`docker exec` +
+`node:sqlite`，D1-only 的 CLI 走不了）。结果 executed、`role_builtin_owner`、audit_written=1。重装/重建后重做此步骤。
 
-**凭据已配（2026-09-29，来源 /tmp/cf-config tar，已配后删除）**：GITHUB_CLIENT_ID/SECRET、
-GITHUB_APP_PRIVATE_KEY（PKCS#8，\n 单行转义；已用 JWT+GET /app 只读验证：app slug
-xuanyi-background-agents、installation 166014231 @ yuxuanyi1-droid）、E2B_API_KEY（已验证）、
-E2B_TEMPLATE_ID=`open-inspect-sandbox-6d354c1e2400-1790691850368658861`（E2B API 确认 ready；
-tar 里的裸名和 aaabdeb2 都是旧值，勿用）、E2B 超时 3300s/自动暂停 true、
-ALLOWED_USERS=yuxuanyi1-droid、DEPLOYMENT_NAME=yuxuanyi1。加密密钥类未复用旧值（本机
-全新生成，数据库与新人绑定）。踩坑记录：把 `\n` 转义 PEM 写进 .env 时不能用 `re.sub`
-（替换串里的 `\n` 会被展开成真换行导致 compose 解析失败），需逐行拼接。
+**凭据已配（2026-09-29，来源 /tmp/cf-config
+tar，已配后删除）**：GITHUB_CLIENT_ID/SECRET、GITHUB_APP_PRIVATE_KEY（PKCS#8，\n 单行转义；已用 JWT+GET
+/app 只读验证：app slug xuanyi-background-agents、installation 166014231 @
+yuxuanyi1-droid）、E2B_API_KEY（已验证）、E2B_TEMPLATE_ID=`open-inspect-sandbox-6d354c1e2400-1790691850368658861`（E2B
+API 确认 ready；tar 里的裸名和 aaabdeb2 都是旧值，勿用）、E2B 超时 3300s/自动暂停 true、ALLOWED_USERS=yuxuanyi1-droid、DEPLOYMENT_NAME=yuxuanyi1。加密密钥类未复用旧值（本机全新生成，数据库与新人绑定）。踩坑记录：把
+`\n` 转义 PEM 写进 .env 时不能用 `re.sub` （替换串里的 `\n`
+会被展开成真换行导致 compose 解析失败），需逐行拼接。
 
 WSL2 侧原环境（8788 端口 node 模式、3000 next dev、SeaweedFS、隧道）不受影响，仍在。
 
@@ -221,8 +250,7 @@ WSL2 侧原环境（8788 端口 node 模式、3000 next dev、SeaweedFS、隧道
 ## 八、新会话续接方法
 
 - WSL2 原机：`#sess_bb1032c9-7ce3-4e33-bdba-c8bea63b1ec2` 引用原会话；服务器新会话：读本文件即可
-- 服务器栈日常操作：`cd /root/background-agents && docker compose -f docker-compose.yml -f
-  docker-compose.web.yml ps/logs/up -d`；数据在 `background-agents_control-plane-data` 卷
-  （Litestream 每秒复制 global.db 到本地 backups 桶）
-- 服务器上未提交的新文件：`packages/web/Dockerfile`、`docker-compose.web.yml`、
-  `.dockerignore` 修改、本文件更新——待 review 后随分支提交
+- 服务器栈日常操作：`cd /root/background-agents && docker compose -f docker-compose.yml -f docker-compose.web.yml ps/logs/up -d`；数据在
+  `background-agents_control-plane-data` 卷（Litestream 每秒复制 global.db 到本地 backups 桶）
+- 服务器上未提交的新文件：`packages/web/Dockerfile`、`docker-compose.web.yml`、 `.dockerignore`
+  修改、本文件更新——待 review 后随分支提交

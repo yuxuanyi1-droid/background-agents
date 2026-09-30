@@ -362,12 +362,16 @@ def test_dsh_patch_declares_routes_and_selection():
         ("https://gateway.example/api/anthropic/v1/", "https://gateway.example/api/anthropic"),
     ],
 )
-def test_pi_and_dsh_write_anthropic_gateways_at_the_api_root(registered: str, expected: str):
-    """pi-ai's Anthropic client joins ``/v1/messages`` itself, so both CLIs'
-    configs carry the API root — a registered version segment would be
-    requested twice. OpenAI gateways keep the segment (their clients append
-    only the wire path)."""
-    from sandbox_runtime.custom_providers import dsh_profile_patch_entries, pi_models_document
+def test_pi_dsh_and_zcode_write_anthropic_gateways_at_the_api_root(registered: str, expected: str):
+    """Every vendored Anthropic client (pi-ai's for Pi and dsh, ZCode's own)
+    joins ``/v1/messages`` itself, so the CLIs' configs carry the API root — a
+    registered version segment would be requested twice. OpenAI gateways keep
+    the segment (their clients append only the wire path)."""
+    from sandbox_runtime.custom_providers import (
+        dsh_profile_patch_entries,
+        pi_models_document,
+        zcode_provider_config_document,
+    )
 
     manifest = anthropic_manifest()
     manifest["baseUrl"] = registered
@@ -378,6 +382,11 @@ def test_pi_and_dsh_write_anthropic_gateways_at_the_api_root(registered: str, ex
 
     dsh_text = "\n".join(dsh_profile_patch_entries(providers))
     assert f'baseURL: "{expected}"' in dsh_text
+
+    zcode_rule = zcode_provider_config_document(providers)["config"]["providerConfigRules"][
+        "providerRules"
+    ][0]
+    assert zcode_rule["config"]["api"]["baseUrl"] == expected
 
     openai_providers = load_custom_providers(manifest_env(openai_manifest()))
     assert (
@@ -399,3 +408,123 @@ def test_write_dsh_profile_patch_regenerates(tmp_path: Path):
     assert write_dsh_profile_patch(patch, _load_both()) is False
     patch.write_text(body + "# trailing edit\n")
     assert write_dsh_profile_patch(patch, _load_both()) is True
+
+
+# --- zcode personal provider config ---
+
+
+def test_zcode_document_registers_every_protocol():
+    from sandbox_runtime.custom_providers import zcode_provider_config_document
+
+    document = zcode_provider_config_document(_load_both())
+    rules = document["config"]["providerConfigRules"]["providerRules"]
+    assert [rule["providerId"] for rule in rules] == ["cpa-00112233", "cpo-99887766"]
+
+    anthropic = rules[0]["config"]
+    assert anthropic["api"] == {
+        "type": "anthropic-messages",
+        "baseUrl": "https://gateway.example/api/anthropic",
+        "headers": {"X-Org": "acme"},
+    }
+    # The api-key rides the file: ZCode has no environment seam for it.
+    assert anthropic["access"] == {"type": "api-key", "apiKey": "sk-gateway"}
+    assert anthropic["personalModelIds"] == ["glm-4.7"]
+
+    openai = rules[1]["config"]
+    assert openai["api"]["type"] == "openai-chat-completions"
+    # OpenAI gateways keep their registered version segment.
+    assert openai["api"]["baseUrl"] == "https://gateway.example/v1"
+
+    model_rules = document["config"]["modelConfigRules"]["providerModelRules"]
+    # Declared efforts become level names, prefixed by zcode's "disabled"; a
+    # model without efforts leaves the levels to the CLI's own fallback rule.
+    assert model_rules[0]["config"] == {
+        "properties": {"contextWindow": 200_000},
+        "optionSpecs": {
+            "maxOutputTokens": {"max": 32_768},
+            "reasoningLevel": {"values": ["disabled", "high"]},
+        },
+    }
+    assert model_rules[1]["config"]["optionSpecs"] == {"maxOutputTokens": {"max": 16_384}}
+
+
+def test_zcode_model_selection_maps_efforts_and_defaults():
+    from sandbox_runtime.custom_providers import zcode_model_selection
+
+    providers = load_custom_providers(manifest_env(anthropic_manifest()))
+    resolved = find_provider_for_model("cpa-00112233/glm-4.7", providers)
+    assert resolved is not None
+    provider, entry = resolved
+    assert zcode_model_selection(provider, entry, "high") == {
+        "providerId": "cpa-00112233",
+        "modelId": "glm-4.7",
+        "options": {"reasoningLevel": "high"},
+    }
+    # The registry's "none" is zcode's "disabled"; no effort takes the
+    # highest declared level, mirroring the CLI's own fresh-selection default.
+    assert zcode_model_selection(provider, entry, "none")["options"] == {
+        "reasoningLevel": "disabled"
+    }
+    assert zcode_model_selection(provider, entry, None)["options"] == {"reasoningLevel": "high"}
+
+    openai_resolved = find_provider_for_model(
+        "cpo-99887766/deepseek-v4-pro", load_custom_providers(manifest_env(openai_manifest()))
+    )
+    assert openai_resolved is not None
+    assert zcode_model_selection(*openai_resolved, None)["options"] == {"reasoningLevel": "enabled"}
+
+
+def test_write_zcode_provider_config_regenerates(tmp_path: Path):
+    from sandbox_runtime.custom_providers import write_zcode_provider_config
+
+    config = tmp_path / ".zcode" / "v2" / "provider_config.json"
+    assert write_zcode_provider_config(config, _load_both()) is True
+    body = config.read_text()
+    assert json.loads(body)["schemaVersion"] == 1
+    assert write_zcode_provider_config(config, _load_both()) is False
+    assert config.read_text() == body
+    config.write_text("{}\n")
+    assert write_zcode_provider_config(config, _load_both()) is True
+    assert json.loads(config.read_text())["schemaVersion"] == 1
+
+    # Without providers nothing is written at all.
+    assert write_zcode_provider_config(tmp_path / "none.json", ()) is False
+    assert not (tmp_path / "none.json").exists()
+
+
+def test_write_zcode_model_selection_updates_in_place(tmp_path: Path):
+    from sandbox_runtime.custom_providers import (
+        write_zcode_model_selection,
+        write_zcode_provider_config,
+    )
+
+    config = tmp_path / "provider_config.json"
+    providers = _load_both()
+    assert write_zcode_provider_config(config, providers) is True
+
+    assert (
+        write_zcode_model_selection(config, providers, "cpo-99887766/deepseek-v4-pro", "none")
+        is True
+    )
+    document = json.loads(config.read_text())
+    assert document["config"]["defaultModelSelection"] == {
+        "providerId": "cpo-99887766",
+        "modelId": "deepseek-v4-pro",
+        "options": {"reasoningLevel": "disabled"},
+    }
+    # The per-turn rewrite leaves the registered providers untouched.
+    assert len(document["config"]["providerConfigRules"]["providerRules"]) == 2
+
+    assert (
+        write_zcode_model_selection(config, providers, "cpo-99887766/deepseek-v4-pro", "none")
+        is False
+    )
+    # An unroutable model leaves the file untouched.
+    assert write_zcode_model_selection(config, providers, "cpo-00000000/nope", None) is False
+    # An unreadable file regenerates from the manifest rather than routing the
+    # turn at whatever selection survived on disk.
+    config.write_text("not json")
+    assert write_zcode_model_selection(config, providers, "cpa-00112233/glm-4.7", "high") is True
+    document = json.loads(config.read_text())
+    assert document["config"]["defaultModelSelection"]["options"] == {"reasoningLevel": "high"}
+    assert len(document["config"]["providerConfigRules"]["providerRules"]) == 2
