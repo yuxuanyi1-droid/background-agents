@@ -2,17 +2,21 @@
 
 Several vendors ship a non-interactive mode that runs one turn, writes
 progress to stdout, and can continue a prior conversation by id: Codex
-(``codex exec``), Pi (``pi --mode json``), DeepSeek Harness
-(``dsh --profile headless``), and ZCode (``zcode --print``). They differ only
-in argv shape and stdout records, so this module owns the process lifecycle,
-the inactivity and prompt deadlines, cancellation, and the vendor-neutral
-bridge-event vocabulary. A ``CliVendor`` supplies the argv builder, the record
-translator, and the exit policy.
+(``codex exec``), Pi (``pi --mode json``), and ZCode (``zcode --prompt``).
+They differ only in argv shape and stdout records, so this module owns the
+process lifecycle, the inactivity and prompt deadlines, cancellation, and the
+vendor-neutral bridge-event vocabulary. A ``CliVendor`` supplies the argv
+builder, the record translator, and the exit policy.
 
-Unlike ``opencode serve``, these agents have no resident server: the
-supervisor half (``CliStager``) only stages the filesystem, and every turn is
-a fresh child process. Conversation continuity rides on the vendor's own
-on-disk session store, which the sandbox snapshot carries.
+The same vendors also ship a resident protocol server — Codex
+``app-server``, Pi ``--mode rpc``, ZCode ``app-server --stdio`` — speaking a
+line protocol over stdio: one long-lived process, a conversation established
+per turn, and a notification stream that settles each turn. A
+``ResidentCliVendor`` supplies that dialect and the harness drives it through
+:class:`_ResidentServer`; the one-shot argv path remains as the
+``OI_CLI_ONE_SHOT`` escape hatch. Either way the supervisor half
+(``CliStager``) only stages the filesystem, and conversation continuity rides
+on the vendor's own on-disk session store, which the sandbox snapshot carries.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ import os
 import shutil
 import signal
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -46,6 +51,10 @@ if TYPE_CHECKING:
 
 STDERR_TAIL_CHARS = 2000
 KILL_GRACE_SECONDS = 5.0
+# Vendor setup chains are short — create/resume then subscribe, or state then
+# model then thinking — so this cap only exists to turn a non-converging
+# vendor into a failed turn instead of a loop.
+SETUP_REQUEST_LIMIT = 4
 
 
 @dataclass
@@ -57,6 +66,7 @@ class CliTurnState:
     text: str = ""
     last_emitted_text: str = ""
     session_id: str | None = None
+    server_turn_id: str | None = None
     error: str | None = None
     emitted_error: bool = False
     cost_usd: float | None = None
@@ -143,6 +153,102 @@ def error_event(state: CliTurnState, message: str) -> list[BridgeEvent]:
 
 
 @runtime_checkable
+class ResidentCliVendor(Protocol):
+    """A vendor driven through a resident line-protocol server.
+
+    The harness spawns the server lazily on the first turn (when the model is
+    known — some vendors only accept it on the command line), replays
+    :meth:`handshake_requests`, then per turn pulls :meth:`next_setup_message`
+    until the conversation is ready — one request at a time, so each may
+    depend on the previous response's adopted id — submits the turn, and
+    translates the notification stream through :meth:`parse_server_message`
+    until the vendor raises :class:`CliTurnSettled`.
+    """
+
+    resident = True
+
+    jsonrpc = True
+    """Whether requests carry the JSON-RPC 2.0 envelope field. Vendors whose
+    wire schema rejects unknown keys (ZCode) or speaks command-shaped frames
+    (Pi) clear it."""
+
+    def server_argv(
+        self,
+        *,
+        session_id: str | None,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> list[str]:
+        """Arguments after the binary name that start the protocol server.
+        The conversation id and model are the spawn-time seam for vendors that
+        only accept them on the command line (Pi); Codex and ZCode route both
+        per turn over the protocol."""
+        ...
+
+    def handshake_requests(self) -> list[dict[str, Any]]:
+        """Requests to send (in order) right after the process starts."""
+        ...
+
+    def reset(self) -> None:
+        """Drop any live-conversation tracking. Called whenever a server
+        process starts, so a restarted one resumes a persisted id instead of
+        assuming its own conversation is still live."""
+        ...
+
+    def next_setup_message(
+        self,
+        *,
+        session_id: str | None,
+        model: str | None,
+        reasoning_effort: str | None,
+        workdir: Path,
+        model_provider: str | None = None,
+    ) -> dict[str, Any] | None:
+        """The next request establishing this turn's conversation, or ``None``
+        when it is ready. Called repeatedly with the latest adopted session
+        id, so one message may depend on the previous response — ZCode needs
+        that to subscribe to a session id only the create response carries."""
+        ...
+
+    def turn_start_message(
+        self,
+        *,
+        session_id: str | None,
+        prompt_text: str,
+        model: str | None,
+        reasoning_effort: str | None,
+        model_provider: str | None = None,
+    ) -> dict[str, Any] | None:
+        """The request submitting the turn, or ``None`` when no conversation
+        id is known (the turn fails as a harness error)."""
+        ...
+
+    def adopt_response_id(self, response: dict[str, Any]) -> str | None:
+        """The conversation id in a setup response, if any."""
+        ...
+
+    def parse_server_message(
+        self, message: dict[str, Any], state: CliTurnState
+    ) -> list[BridgeEvent]:
+        """Translate one queued protocol message (notification, event, or a
+        server→client request); raise :class:`CliTurnSettled` on the turn's
+        terminal notification."""
+        ...
+
+    def interrupt_messages(
+        self, *, session_id: str | None, state: CliTurnState | None
+    ) -> list[dict[str, Any]]:
+        """Requests that ask the server to stop the running turn."""
+        ...
+
+    def server_request_messages(self, message: dict[str, Any]) -> list[dict[str, Any]]:
+        """Raw frames answering a server→client request carried by
+        ``message``. Unattended harnesses must deny or cancel them — a
+        permission or input prompt nobody answers would hang the turn."""
+        ...
+
+
+@runtime_checkable
 class CliVendor(Protocol):
     """One vendor CLI behind the generic subprocess harness."""
 
@@ -197,6 +303,173 @@ class CliPromptTimeout(Exception):
     """The whole turn exceeded the prompt budget."""
 
 
+class CliTurnSettled(Exception):
+    """A resident vendor saw the turn's terminal notification.
+
+    The protocol server keeps running after a turn, so the consume loop ends
+    on this sentinel instead of the stdout EOF a one-shot child relies on. The
+    terminal notification's own events ride the sentinel so the loop can emit
+    them before ending the turn.
+    """
+
+    def __init__(self, events: list[Any] | None = None) -> None:
+        super().__init__("turn settled")
+        self.events = events or []
+
+
+class _ResidentServer:
+    """A resident vendor protocol server: one process, many turns.
+
+    A background reader correlates responses to pending requests by id and
+    queues every other message as a notification — protocol notifications,
+    command-shaped events, and server→client requests all ride that queue.
+    stderr is drained into a bounded tail, so a chatty server never blocks on
+    a full pipe. ``run_prompt`` sends its turn requests through
+    :meth:`request`, then translates queued notifications until the vendor
+    raises :class:`CliTurnSettled`. The process is killed on close; a mid-turn
+    death fails that turn and the next one restarts it (conversations resume
+    by id).
+    """
+
+    def __init__(self, vendor: ResidentCliVendor, log: StructuredLogger) -> None:
+        self._vendor = vendor
+        self._log = log
+        self._process: asyncio.subprocess.Process | None = None
+        self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._notifications: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._reader_task: asyncio.Task[None] | None = None
+        self._stderr_task: asyncio.Task[None] | None = None
+        self._stderr_tail = ""
+        self._rpc_id = 0
+
+    @property
+    def alive(self) -> bool:
+        return self._process is not None and self._process.returncode is None
+
+    @property
+    def stderr_tail(self) -> str:
+        """The last stderr lines, for failure diagnostics after a death."""
+        return self._stderr_tail
+
+    async def start(
+        self,
+        workdir: Path,
+        *,
+        session_id: str | None,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> None:
+        assert self._process is None
+        argv = [
+            self._vendor.binary,
+            *self._vendor.server_argv(
+                session_id=session_id, model=model, reasoning_effort=reasoning_effort
+            ),
+        ]
+        self._process = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=str(workdir),
+            env=os.environ,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        assert self._process.stdout is not None and self._process.stderr is not None
+        self._reader_task = asyncio.create_task(self._read_stdout(self._process.stdout))
+        self._stderr_task = asyncio.create_task(self._drain_stderr(self._process.stderr))
+        # A fresh process knows no conversation: the vendor must resume any
+        # persisted id instead of assuming its own live one.
+        self._vendor.reset()
+        for message in self._vendor.handshake_requests():
+            await self.request(message)
+
+    async def _read_stdout(self, stream: asyncio.StreamReader) -> None:
+        while True:
+            line = await stream.readline()
+            if not line:
+                return
+            text = line.decode("utf-8", errors="replace").strip()
+            if not text:
+                continue
+            try:
+                message = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(message, dict):
+                continue
+            request_id = message.get("id")
+            if isinstance(request_id, str) and request_id in self._pending:
+                future = self._pending.pop(request_id)
+                if not future.done():
+                    future.set_result(message)
+            else:
+                self._notifications.put_nowait(message)
+
+    async def _drain_stderr(self, stream: asyncio.StreamReader) -> None:
+        tail: deque[str] = deque(maxlen=16)
+        while True:
+            line = await stream.readline()
+            if not line:
+                return
+            tail.append(line.decode("utf-8", errors="replace").rstrip())
+            self._stderr_tail = "\n".join(tail)[-4096:]
+
+    async def request(self, payload: dict[str, Any], timeout: float = 30.0) -> dict[str, Any]:
+        """Send one request and await its correlated response."""
+        process = self._process
+        if process is None or process.stdin is None or not self.alive:
+            raise RuntimeError("The vendor protocol server is not running.")
+        self._rpc_id += 1
+        request_id = f"oi-{self._rpc_id}"
+        envelope: dict[str, Any] = {"id": request_id}
+        if getattr(self._vendor, "jsonrpc", True):
+            envelope["jsonrpc"] = "2.0"
+        payload = envelope | payload
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._pending[request_id] = future
+        try:
+            process.stdin.write((json.dumps(payload) + "\n").encode())
+            await process.stdin.drain()
+            return await asyncio.wait_for(future, timeout)
+        finally:
+            self._pending.pop(request_id, None)
+
+    async def send(self, frame: dict[str, Any]) -> None:
+        """Write one raw frame — no id assigned, no response awaited — the
+        seam for answering server→client requests."""
+        process = self._process
+        if process is None or process.stdin is None or not self.alive:
+            raise RuntimeError("The vendor protocol server is not running.")
+        process.stdin.write((json.dumps(frame) + "\n").encode())
+        await process.stdin.drain()
+
+    async def next_notification(self, timeout: float) -> dict[str, Any] | None:
+        try:
+            return await asyncio.wait_for(self._notifications.get(), timeout)
+        except TimeoutError:
+            return None
+
+    def drop_queued_notifications(self) -> None:
+        while not self._notifications.empty():
+            self._notifications.get_nowait()
+
+    async def kill(self) -> None:
+        process = self._process
+        if process is None:
+            return
+        self._process = None
+        for task in (self._reader_task, self._stderr_task):
+            if task is not None:
+                task.cancel()
+        self._reader_task = None
+        self._stderr_task = None
+        if process.returncode is None:
+            process.kill()
+            with contextlib.suppress(ProcessLookupError):
+                await process.wait()
+
+
 class CliHarness:
     """Bridge half for a ``CliVendor``; owns one child process per turn."""
 
@@ -218,6 +491,22 @@ class CliHarness:
         self._process: asyncio.subprocess.Process | None = None
         self._abort_requested = False
         self._custom_providers: tuple[CustomProvider, ...] = ()
+        self._server: _ResidentServer | None = None
+        self._active_state: CliTurnState | None = None
+
+    @property
+    def _resident_mode(self) -> bool:
+        """Resident protocol mode, unless the one-shot fuse is pulled for this
+        harness id (``OI_CLI_ONE_SHOT=codex,pi,zcode``) — an escape hatch when
+        a vendor's server mode misbehaves."""
+        if not getattr(self.vendor, "resident", False):
+            return False
+        one_shot = {
+            name.strip()
+            for name in os.environ.get("OI_CLI_ONE_SHOT", "").split(",")
+            if name.strip()
+        }
+        return self.vendor.id.value not in one_shot
 
     @property
     def id(self) -> HarnessId:
@@ -230,8 +519,13 @@ class CliHarness:
             )
         self._custom_providers = load_custom_providers(os.environ)
         self.vendor.prepare(self._custom_providers)
+        # The resident protocol server starts lazily on the first turn, when
+        # the model is known: some vendors only accept it on the command line.
 
     async def close(self) -> None:
+        if self._server is not None:
+            await self._server.kill()
+            self._server = None
         if self._process is not None:
             await self._kill(self._process)
 
@@ -267,6 +561,15 @@ class CliHarness:
         resolved = (
             find_provider_for_model(prompt.model, self._custom_providers) if prompt.model else None
         )
+        if self._resident_mode:
+            assert self.vendor is not None
+            self._active_state = state
+            try:
+                return await self._run_prompt_resident(
+                    prompt, state, resolved[0].provider_key if resolved else None, budget, emit
+                )
+            finally:
+                self._active_state = None
         argv = [
             self.vendor.binary,
             *self.vendor.build_argv(
@@ -332,6 +635,136 @@ class CliHarness:
         await emit(step_finish_event(state, reason="completed"))
         return self.vendor.exit_outcome(state, returncode, stderr_tail)
 
+    async def _run_prompt_resident(
+        self,
+        prompt: HarnessPrompt,
+        state: CliTurnState,
+        model_provider: str | None,
+        budget: float,
+        emit: EventSink,
+    ) -> TurnOutcome:
+        """Run one turn over the resident protocol server.
+
+        The server starts lazily here and is restarted (with the conversation
+        resumed by id) when a previous turn killed or lost it; a turn ending
+        normally leaves it running for the next one.
+        """
+        server = self._server
+        if server is None or not server.alive:
+            if server is not None:
+                await server.kill()
+            server = _ResidentServer(self.vendor, self.log)  # type: ignore[arg-type]
+            await server.start(
+                self.workdir,
+                session_id=self.session_id,
+                model=prompt.model,
+                reasoning_effort=prompt.reasoning_effort,
+            )
+            self._server = server
+        server.drop_queued_notifications()
+        self._abort_requested = False
+        vendor: ResidentCliVendor = self.vendor  # type: ignore[assignment]
+        timeout_error: Exception | None = None
+        try:
+            async with asyncio.timeout(budget):
+                # One setup request at a time, each seeing the latest adopted
+                # id; the cap turns a vendor that never converges into a turn
+                # failure instead of a loop.
+                for _ in range(SETUP_REQUEST_LIMIT):
+                    message = vendor.next_setup_message(
+                        session_id=self.session_id,
+                        model=prompt.model,
+                        reasoning_effort=prompt.reasoning_effort,
+                        workdir=self.workdir,
+                        model_provider=model_provider,
+                    )
+                    if message is None:
+                        break
+                    response = await server.request(message)
+                    failure = _response_error(response)
+                    if failure is not None:
+                        return TurnOutcome.failed(
+                            f"{_request_label(message)}: {failure}",
+                            message_cost_usd=state.cost_usd,
+                        )
+                    adopted = vendor.adopt_response_id(response)
+                    if adopted:
+                        self.session_id = adopted
+                        state.session_id = adopted
+                        self.log.info(
+                            f"{self.vendor.id.value}.session.ensure",
+                            agent_session_id=adopted,
+                            action="created",
+                        )
+                else:
+                    return TurnOutcome.failed(
+                        f"The {self.vendor.id.value} conversation setup did not converge.",
+                        message_cost_usd=state.cost_usd,
+                    )
+                start = vendor.turn_start_message(
+                    session_id=self.session_id,
+                    prompt_text=prompt.text,
+                    model=prompt.model,
+                    reasoning_effort=prompt.reasoning_effort,
+                    model_provider=model_provider,
+                )
+                if start is None:
+                    return TurnOutcome.failed(
+                        f"The {self.vendor.id.value} conversation could not be started."
+                    )
+                response = await server.request(start)
+                failure = _response_error(response)
+                if failure is not None:
+                    return TurnOutcome.failed(
+                        f"{_request_label(start)}: {failure}",
+                        message_cost_usd=state.cost_usd,
+                    )
+                await self._consume_server_notifications(server, state, emit)
+        except (TimeoutError, CliPromptTimeout) as error:
+            timeout_error = (
+                error
+                if isinstance(error, CliPromptTimeout)
+                else CliPromptTimeout("The turn exceeded its time budget.")
+            )
+        except CliInactivityTimeout as error:
+            timeout_error = error
+        except asyncio.CancelledError:
+            await server.kill()
+            raise
+        if timeout_error is not None:
+            # The server may still be mid-turn; the next turn restarts it.
+            await server.kill()
+            self._server = None
+            return TurnOutcome.failed(str(timeout_error), message_cost_usd=state.cost_usd)
+        await emit(step_finish_event(state, reason="completed"))
+        return vendor.exit_outcome(state, 0, "")
+
+    async def _consume_server_notifications(
+        self, server: _ResidentServer, state: CliTurnState, emit: EventSink
+    ) -> None:
+        vendor: ResidentCliVendor = self.vendor  # type: ignore[assignment]
+        while True:
+            message = await server.next_notification(self.limits.inactivity_timeout_seconds)
+            if message is None:
+                raise CliInactivityTimeout(
+                    f"No output for {self.limits.inactivity_timeout_seconds:.0f}s."
+                )
+            for reply in vendor.server_request_messages(message):
+                # Server→client requests must be answered — a permission or
+                # input prompt nobody replies to would hang the turn. Replies
+                # are fire-and-forget: a dead server surfaces as a death
+                # below or a failed turn request next time.
+                with contextlib.suppress(Exception):
+                    await server.send(reply)
+            try:
+                events = vendor.parse_server_message(message, state)
+            except CliTurnSettled as settled:
+                for event in settled.events:
+                    await emit(event)
+                return
+            for event in events:
+                await emit(event)
+
     async def _consume_jsonl(
         self, stream: asyncio.StreamReader, state: CliTurnState, emit: EventSink
     ) -> None:
@@ -378,6 +811,23 @@ class CliHarness:
         return True
 
     async def stop_execution(self, timeout_seconds: float) -> bool:
+        server = self._server
+        if server is not None and server.alive:
+            vendor: ResidentCliVendor = self.vendor  # type: ignore[assignment]
+            try:
+                for message in vendor.interrupt_messages(
+                    session_id=self.session_id, state=self._active_state
+                ):
+                    # Interrupts are fire-and-forget: the turn loop settles on
+                    # the server's terminal notification, or its death below.
+                    await server.request(message, timeout=max(timeout_seconds, 5.0))
+                return True
+            except Exception:
+                # An interrupt that cannot be delivered falls back to killing
+                # the server; the next turn restarts and resumes the thread.
+                await server.kill()
+                self._server = None
+                return True
         process = self._process
         if process is None:
             return True
@@ -406,6 +856,23 @@ class CliHarness:
                     process.kill()
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(process.wait(), KILL_GRACE_SECONDS)
+
+
+def _response_error(response: dict[str, Any]) -> str | None:
+    """The failure text in a protocol response, whatever its envelope: a
+    JSON-RPC error object or a command response carrying success/error."""
+    error = response.get("error")
+    if isinstance(error, dict) and isinstance(error.get("message"), str):
+        return error["message"]
+    if isinstance(error, str) and error:
+        return error
+    return None
+
+
+def _request_label(message: dict[str, Any]) -> str:
+    """How a request names itself in a failure, across envelope styles."""
+    label = message.get("method") or message.get("type")
+    return label if isinstance(label, str) and label else "request"
 
 
 def _decode_tail(stderr_task: asyncio.Task[bytes]) -> str:

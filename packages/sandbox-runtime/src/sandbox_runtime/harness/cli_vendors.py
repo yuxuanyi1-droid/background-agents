@@ -1,42 +1,43 @@
 """Vendor descriptions for the generic CLI harness (see ``cli_harness.py``).
 
 Each class encodes one vendor's non-interactive contract: the argv for a turn,
-the stdout record shapes, and how the process exit maps to a turn outcome.
-They are deliberately small and side-effect free so the translation can be
-unit-tested against synthetic records without the vendor installed.
+the stdout record shapes, and how the process exit maps to a turn outcome —
+plus, for vendors with a resident protocol server, the request/notification
+dialect that contract's resident half speaks. They are deliberately small and
+side-effect free so the translation can be unit-tested against synthetic
+records without the vendor installed.
 
 Session continuity differs by vendor:
 
-- Codex and DeepSeek Harness create the conversation themselves; the id is
-  read from the first stdout record and passed back on the next turn.
-- Pi accepts a client-chosen ``--session-id`` and creates it when absent, so
-  the id is chosen up front.
-- ZCode's CLI exposes no documented resume switch, so every turn is a fresh
-  process and continuity is not available yet.
+- One-shot turns: Codex creates the conversation itself (the id rides the
+  first stdout record), Pi accepts a client-chosen ``--session-id``, and
+  ZCode's CLI exposes no resume switch (every turn is a fresh conversation).
+- Resident servers: Codex threads and ZCode sessions are created server-side
+  and resumed by id after a restart; Pi's session id is chosen up front at
+  spawn (``--session-id``) and confirmed by ``get_state``.
 """
 
 from __future__ import annotations
 
-import os
-import tempfile
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..custom_providers import (
     codex_model_catalog_path,
-    dsh_model_selection_patch,
+    find_provider_for_model,
     load_custom_providers,
     write_codex_model_catalog,
     write_codex_model_providers,
-    write_dsh_profile_patch,
     write_pi_models_json,
     write_zcode_model_selection,
     write_zcode_provider_config,
+    zcode_model_selection,
     zcode_provider_config_path,
 )
 from .base import HarnessId, TurnOutcome
 from .cli_harness import (
+    CliTurnSettled,
     CliTurnState,
     append_text_events,
     error_event,
@@ -55,6 +56,39 @@ def _bare_model(model: str | None) -> str | None:
     return model.split("/", 1)[1] if "/" in model else model
 
 
+def _pi_thinking_level(effort: str) -> str:
+    # Pi's level for disabling thinking is "off", not the registry's "none".
+    return "off" if effort == "none" else effort
+
+
+def _jsonrpc_unattended_reply_error(request_id: str, method: str) -> dict[str, Any]:
+    # Answering with a protocol error releases the server's pending request
+    # instead of hanging the turn on input no interactive client will give.
+    return {
+        "id": request_id,
+        "error": {"code": -32601, "message": f"No client available for {method}"},
+    }
+
+
+def _jsonrpc_unattended_reply(message: dict[str, Any]) -> list[dict[str, Any]]:
+    request_id = message.get("id")
+    method = message.get("method")
+    if not (isinstance(request_id, str) and isinstance(method, str)):
+        return []
+    return [_jsonrpc_unattended_reply_error(request_id, method)]
+
+
+def _result_text(result: Any) -> str:
+    """Best-effort text from a tool result object of unknown shape."""
+    if isinstance(result, dict):
+        for key in ("content", "text", "output", "summary"):
+            value = result.get(key)
+            if isinstance(value, str):
+                return value
+        return ""
+    return _as_text(result)
+
+
 def _as_text(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -67,12 +101,42 @@ def _as_text(value: Any) -> str:
     return ""
 
 
+# App-server item types are camelCase; the exec stream and the translator
+# below speak snake_case.
+_CODEX_ITEM_TYPES = {
+    "userMessage": "user_message",
+    "agentMessage": "agent_message",
+    "reasoning": "reasoning",
+    "webSearch": "web_search",
+    "commandExecution": "command_execution",
+    "fileChange": "file_change",
+    "mcpToolCall": "mcp_tool_call",
+    "error": "error",
+}
+
+
 class CodexVendor:
-    """OpenAI Codex CLI (``codex exec --json``)."""
+    """OpenAI Codex CLI driven through its resident app-server.
+
+    ``codex app-server`` speaks JSON-RPC over stdio: one ``initialize``, a
+    ``thread/start`` (or ``thread/resume`` after a restart) carrying the
+    routed model provider, and a ``turn/start`` per turn whose
+    ``turn/completed``/``turn/failed`` notification settles it. The item and
+    turn notifications carry the same payloads the ``codex exec --json``
+    records did, so translation reuses the one-shot parser behind a thin
+    envelope adapter. The one-shot argv path stays for the
+    ``OI_CLI_ONE_SHOT=codex`` escape hatch.
+    """
 
     id = HarnessId.CODEX
     binary = "codex"
     json_stream = True
+    resident = True
+
+    def __init__(self) -> None:
+        # The thread id this server process created; a persisted id adopted
+        # from a previous process is resumed lazily on its first turn.
+        self._live_thread_id: str | None = None
 
     def initial_session_id(self) -> str | None:
         return None
@@ -119,6 +183,148 @@ class CodexVendor:
         """Register OpenAI-protocol gateways in the CLI's ``config.toml``."""
         write_codex_model_providers(Path.home() / ".codex" / "config.toml", custom_providers)
         write_codex_model_catalog(codex_model_catalog_path(), custom_providers)
+
+    # --- Resident app-server protocol -------------------------------------
+
+    def server_argv(
+        self,
+        *,
+        session_id: str | None,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> list[str]:
+        return ["app-server"]
+
+    def reset(self) -> None:
+        # A fresh app-server knows no thread: a persisted id resumes lazily.
+        self._live_thread_id = None
+
+    def handshake_requests(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "method": "initialize",
+                "params": {"clientInfo": {"name": "open-inspect", "version": "0"}},
+            }
+        ]
+
+    def next_setup_message(
+        self,
+        *,
+        session_id: str | None,
+        model: str | None,
+        reasoning_effort: str | None,
+        workdir: Path,
+        model_provider: str | None = None,
+    ) -> dict[str, Any] | None:
+        """``thread/start`` for a new conversation, ``thread/resume`` for one
+        adopted from a previous server process, nothing while the thread this
+        process created is still live."""
+        if session_id and session_id == self._live_thread_id:
+            return None
+        bare = _bare_model(model)
+        params: dict[str, Any] = {"cwd": str(workdir)}
+        if model_provider:
+            params["modelProvider"] = model_provider
+            # Same per-turn catalog the exec path passes as -c: the routed
+            # model's metadata, so the CLI does not fall back and warn.
+            params["config"] = {"model_catalog_json": str(codex_model_catalog_path())}
+        if bare:
+            params["model"] = bare
+        if session_id:
+            return {"method": "thread/resume", "params": params | {"threadId": session_id}}
+        return {"method": "thread/start", "params": params}
+
+    def turn_start_message(
+        self,
+        *,
+        session_id: str | None,
+        prompt_text: str,
+        model: str | None,
+        reasoning_effort: str | None,
+        model_provider: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not session_id:
+            return None
+        params: dict[str, Any] = {
+            "threadId": session_id,
+            "input": [{"type": "text", "text": prompt_text}],
+        }
+        bare = _bare_model(model)
+        if bare:
+            params["model"] = bare
+        if reasoning_effort:
+            params["effort"] = reasoning_effort
+        return {"method": "turn/start", "params": params}
+
+    def adopt_response_id(self, response: dict[str, Any]) -> str | None:
+        result = response.get("result")
+        thread = result.get("thread") if isinstance(result, dict) else None
+        thread_id = thread.get("id") if isinstance(thread, dict) else None
+        if isinstance(thread_id, str) and thread_id:
+            self._live_thread_id = thread_id
+            return thread_id
+        return None
+
+    def parse_server_message(self, message: dict[str, Any], state: CliTurnState) -> list[Any]:
+        method = message.get("method")
+        if not isinstance(method, str):
+            return []
+        record = self._exec_record(message)
+        if method == "turn/started":
+            turn = message.get("params", {}).get("turn", {})
+            if isinstance(turn, dict) and isinstance(turn.get("id"), str):
+                state.server_turn_id = turn["id"]
+            return self.parse_record(record, state)
+        if method == "turn/completed":
+            events = self.parse_record(record, state)
+            raise CliTurnSettled(events)
+        if method == "turn/failed":
+            events = self.parse_record(record, state)
+            raise CliTurnSettled(events)
+        return self.parse_record(record, state)
+
+    def interrupt_messages(
+        self, *, session_id: str | None, state: CliTurnState | None
+    ) -> list[dict[str, Any]]:
+        thread_id = session_id or self._live_thread_id
+        if not thread_id or state is None or not state.server_turn_id:
+            return []
+        return [
+            {
+                "method": "turn/interrupt",
+                "params": {"threadId": thread_id, "turnId": state.server_turn_id},
+            }
+        ]
+
+    def server_request_messages(self, message: dict[str, Any]) -> list[dict[str, Any]]:
+        return _jsonrpc_unattended_reply(message)
+
+    def _exec_record(self, message: dict[str, Any]) -> dict[str, Any]:
+        """Adapt one JSON-RPC notification to the ``exec --json`` record shape
+        the one-shot parser consumes."""
+        method = message.get("method", "")
+        params = message.get("params", {})
+        record: dict[str, Any] = {"type": method.replace("/", ".")}
+        item = params.get("item")
+        if isinstance(item, dict):
+            adapted = dict(item)
+            item_type = adapted.get("type")
+            if isinstance(item_type, str):
+                adapted["type"] = _CODEX_ITEM_TYPES.get(item_type, item_type)
+            record["item"] = adapted
+        turn = params.get("turn")
+        if isinstance(turn, dict):
+            record["turn"] = turn
+            usage = turn.get("usage")
+            if isinstance(usage, dict):
+                record["usage"] = usage
+            error = turn.get("error")
+            if isinstance(error, dict) and error:
+                record["error"] = error
+        error = params.get("error")
+        if isinstance(error, dict) and error:
+            record["error"] = error
+        return record
 
     def parse_record(self, record: dict[str, Any], state: CliTurnState) -> list[Any]:
         kind = record.get("type")
@@ -205,14 +411,33 @@ class CodexVendor:
 
 
 class PiVendor:
-    """Pi coding agent (``pi --mode json``)."""
+    """Pi coding agent: one-shot ``pi --mode json`` turns, or the resident
+    ``pi --mode rpc`` server.
+
+    The rpc mode runs Pi as a long-lived subprocess speaking JSON records on
+    stdin/stdout — the same ``toJsonEvent`` stream the json mode prints, so
+    record translation is shared. Commands are ``{type, ...}`` frames with an
+    optional id (no JSON-RPC envelope), a ``prompt`` command only acknowledges
+    (the turn settles on the ``agent_settled`` event), and the model rides the
+    spawn argv plus ``set_model``/``set_thinking_level`` commands.
+    """
 
     id = HarnessId.PI
     binary = "pi"
     json_stream = True
+    resident = True
+    jsonrpc = False
+
+    def __init__(self) -> None:
+        # The rpc server is probed once per process; the model and thinking
+        # level are re-applied only on change, so setup converges in a pass.
+        self._probed = False
+        self._applied_model: str | None = None
+        self._applied_thinking: str | None = None
 
     def initial_session_id(self) -> str | None:
-        # Pi accepts ``--session-id`` as an exact id, creating it when absent.
+        # Pi accepts ``--session-id`` as an exact id, creating it when absent,
+        # so both one-shot children and resident spawns carry a chosen id.
         return str(uuid.uuid4())
 
     def build_argv(
@@ -231,8 +456,7 @@ class PiVendor:
         if model:
             argv += ["--model", model]
         if reasoning_effort:
-            # Pi's level for disabling thinking is "off", not the registry's "none".
-            argv += ["--thinking", "off" if reasoning_effort == "none" else reasoning_effort]
+            argv += ["--thinking", _pi_thinking_level(reasoning_effort)]
         argv += ["--", prompt_text]
         return argv
 
@@ -247,6 +471,106 @@ class PiVendor:
         bridge already passes, so no argv routing is needed.
         """
         write_pi_models_json(Path.home() / ".pi" / "agent" / "models.json", custom_providers)
+
+    # --- Resident rpc protocol ----------------------------------------------
+
+    def server_argv(
+        self,
+        *,
+        session_id: str | None,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> list[str]:
+        # A non-interactive spawn must resolve a model or the CLI exits at
+        # startup, so the first turn's selection rides the argv; later
+        # changes go through set_model in the setup chain.
+        argv = ["--mode", "rpc", "--approve"]
+        if session_id:
+            argv += ["--session-id", session_id]
+        if model:
+            argv += ["--model", model]
+        if reasoning_effort:
+            argv += ["--thinking", _pi_thinking_level(reasoning_effort)]
+        return argv
+
+    def reset(self) -> None:
+        self._probed = False
+        self._applied_model = None
+        self._applied_thinking = None
+
+    def handshake_requests(self) -> list[dict[str, Any]]:
+        # No initialize in this protocol; get_state on the first turn doubles
+        # as the readiness probe.
+        return []
+
+    def next_setup_message(
+        self,
+        *,
+        session_id: str | None,
+        model: str | None,
+        reasoning_effort: str | None,
+        workdir: Path,
+        model_provider: str | None = None,
+    ) -> dict[str, Any] | None:
+        """``get_state`` to adopt the session id, then the model and thinking
+        level applied on change — the protocol seam for what argv routing does
+        in one-shot mode."""
+        if not self._probed:
+            self._probed = True
+            return {"type": "get_state"}
+        if model and model != self._applied_model:
+            self._applied_model = model
+            provider, _, model_id = model.partition("/")
+            if provider and model_id:
+                return {"type": "set_model", "provider": provider, "modelId": model_id}
+        if reasoning_effort and reasoning_effort != self._applied_thinking:
+            self._applied_thinking = reasoning_effort
+            return {"type": "set_thinking_level", "level": _pi_thinking_level(reasoning_effort)}
+        return None
+
+    def turn_start_message(
+        self,
+        *,
+        session_id: str | None,
+        prompt_text: str,
+        model: str | None,
+        reasoning_effort: str | None,
+        model_provider: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not session_id:
+            return None
+        # The response only acknowledges the prompt; the turn settles on
+        # agent_settled.
+        return {"type": "prompt", "message": prompt_text}
+
+    def adopt_response_id(self, response: dict[str, Any]) -> str | None:
+        if response.get("type") != "response" or response.get("command") != "get_state":
+            return None
+        data = response.get("data")
+        session_id = data.get("sessionId") if isinstance(data, dict) else None
+        return session_id if isinstance(session_id, str) and session_id else None
+
+    def parse_server_message(self, message: dict[str, Any], state: CliTurnState) -> list[Any]:
+        # Command responses ride the same stream; only events translate.
+        if message.get("type") == "response":
+            return []
+        events = self.parse_record(message, state)
+        if message.get("type") == "agent_settled":
+            # Settled is the terminal: Pi has stopped retrying, compacting,
+            # and draining queued messages, not just ended one agent run.
+            raise CliTurnSettled(events)
+        return events
+
+    def interrupt_messages(
+        self, *, session_id: str | None, state: CliTurnState | None
+    ) -> list[dict[str, Any]]:
+        return [{"type": "abort"}]
+
+    def server_request_messages(self, message: dict[str, Any]) -> list[dict[str, Any]]:
+        # Extension UI prompts are answered as cancelled: nobody is watching.
+        if message.get("type") == "extension_ui_request" and isinstance(message.get("id"), str):
+            return [{"type": "extension_ui_response", "id": message["id"], "cancelled": True}]
+        return []
 
     def parse_record(self, record: dict[str, Any], state: CliTurnState) -> list[Any]:
         kind = record.get("type")
@@ -352,132 +676,37 @@ class PiVendor:
         return _default_exit_outcome("pi", state, returncode, stderr_tail)
 
 
-class DshVendor:
-    """DeepSeek Harness (``dsh --profile headless --json``)."""
-
-    id = HarnessId.DSH
-    binary = "dsh"
-    json_stream = True
-
-    def initial_session_id(self) -> str | None:
-        # An unknown ``--session-id`` is rejected, so the id is read from the
-        # opening session record instead of chosen here.
-        return None
-
-    def build_argv(
-        self,
-        *,
-        session_id: str | None,
-        prompt_text: str,
-        model: str | None,
-        reasoning_effort: str | None,
-        workdir: Path,
-        model_provider: str | None = None,
-    ) -> list[str]:
-        argv = ["--profile", "headless"]
-        if model_provider:
-            # The headless profile has no model flag: the routed model rides a
-            # per-turn --patch overlay of the agent-default-model config, the
-            # same overlay mechanism the provider declaration below uses.
-            bare = _bare_model(model)
-            if bare:
-                selection_path = Path(tempfile.gettempdir()) / "oi-dsh-model-selection.yml"
-                selection_path.write_text(
-                    dsh_model_selection_patch(model_provider, bare, reasoning_effort)
-                )
-                argv += ["--patch", str(selection_path)]
-        argv += ["--json"]
-        if session_id:
-            argv += ["--session-id", session_id]
-        argv.append(prompt_text)
-        return argv
-
-    def extra_env(self, *, model: str | None) -> dict[str, str]:
-        bare = _bare_model(model)
-        return {"DSH_MODEL": bare} if bare else {}
-
-    def prepare(self, custom_providers: tuple[CustomProvider, ...]) -> None:
-        """Declare the providers in the headless profile's user patch layer.
-
-        dsh's LLM stack is pi-ai behind a cordis config overlay, so a route
-        pi-ai has never heard of is fully describable from ``cordis.patch.yml``;
-        the credential ref resolves from the provider's env var.
-        """
-        home = Path(os.environ.get("DSH_HOME") or (Path.home() / ".dsh"))
-        write_dsh_profile_patch(
-            home / "profiles" / "headless" / "cordis.patch.yml", custom_providers
-        )
-
-    def parse_record(self, record: dict[str, Any], state: CliTurnState) -> list[Any]:
-        session_id = record.get("sessionId")
-        events: list[Any] = []
-        if isinstance(session_id, str) and session_id:
-            state.session_id = session_id
-        kind = record.get("type")
-        if kind == "text":
-            delta = record.get("delta")
-            if isinstance(delta, str):
-                events += append_text_events(state, delta)
-            else:
-                text = record.get("text") or record.get("content")
-                if isinstance(text, str):
-                    events += append_text_events(state, text)
-            return events
-        if kind == "tool_call":
-            # Record shape per dsh-headless's projection (0.1.7-rc.2): the
-            # tool name rides `tool` and the arguments `input`.
-            return tool_events(
-                state,
-                call_id=str(record.get("callId") or record.get("id") or "tool"),
-                name=str(record.get("tool") or record.get("name") or "tool"),
-                args=record.get("input") if isinstance(record.get("input"), dict) else {},
-                status="running",
-            )
-        if kind == "tool_result":
-            # Result records carry no tool name — tool_events keeps the one the
-            # tool_call record learned — and report errors as status:"error".
-            return tool_events(
-                state,
-                call_id=str(record.get("callId") or record.get("id") or "tool"),
-                name="",
-                args=None,
-                status="error" if record.get("status") == "error" else "completed",
-                output=_as_text(record.get("result")),
-            )
-        if kind == "final":
-            text = record.get("text") or record.get("content")
-            if isinstance(text, str):
-                events += text_events(state, text)
-            state.completed = True
-            return events
-        if kind == "error":
-            return error_event(state, _error_text(record) or "DeepSeek Harness reported an error")
-        return events
-
-    def exit_outcome(
-        self, state: CliTurnState, returncode: int | None, stderr_tail: str
-    ) -> TurnOutcome:
-        return _default_exit_outcome("dsh", state, returncode, stderr_tail)
-
-
 class ZcodeVendor:
-    """ZCode CLI (``zcode --prompt``), text output only.
+    """ZCode CLI: one-shot ``zcode --prompt`` turns, or the resident
+    ``app-server``.
 
-    Verified against the v3.14.3 source build: ``--prompt`` runs one headless
-    turn (permission mode defaults to ``yolo`` under it, so no approvals) and
-    ``--json`` emits nothing for ``--prompt``. Custom providers ride the CLI's
-    personal provider config — ZCode offers no environment seam for endpoints
-    or keys, so unlike the other vendors the api-key rides the file as a
-    literal. The CLI reads its model from the same file's
-    ``defaultModelSelection``, so each turn rewrites that field before the
-    spawn (the per-turn seam the dsh vendor solves with a patch overlay). A
-    session id is never captured today (the plain-text stream does not carry
-    one), so ``--resume`` stays unwired and every turn is a fresh conversation.
+    The resident path is the same channel the desktop app drives the CLI
+    with: ``zcode app-server --stdio`` speaking NDJSON frames —
+    ``{id, method, params}`` requests with no JSON-RPC envelope field (the
+    wire schema rejects unknown keys) — a session created per conversation
+    (server-chosen id; a client-chosen one is refused outside imported
+    history), event delivery turned on by ``session/subscribe``, turns
+    submitted with ``session/send`` and observed through ``session/event``
+    notifications until ``turn.completed``/``turn.failed``.
+
+    One-shot turns remain plain text: ``--prompt`` runs one headless turn
+    (permission mode defaults to ``yolo`` under it, so no approvals) and
+    carries no session id on the stream, so every one-shot turn is a fresh
+    conversation. Custom providers ride the CLI's personal provider config —
+    ZCode offers no environment seam for endpoints or keys, so unlike the
+    other vendors the api-key rides the file as a literal; one-shot turns
+    rewrite its ``defaultModelSelection`` before each spawn while resident
+    turns pass the selection per ``session/send``.
     """
 
     id = HarnessId.ZCODE
     binary = "zcode"
     json_stream = False
+    resident = True
+
+    def __init__(self) -> None:
+        self._live_session_id: str | None = None
+        self._subscribed_session: str | None = None
 
     def initial_session_id(self) -> str | None:
         return None
@@ -508,6 +737,172 @@ class ZcodeVendor:
         """Register the providers in the CLI's personal provider config."""
         write_zcode_provider_config(zcode_provider_config_path(), custom_providers)
 
+    # --- Resident app-server protocol -------------------------------------
+
+    def server_argv(
+        self,
+        *,
+        session_id: str | None,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> list[str]:
+        return ["app-server", "--stdio"]
+
+    def reset(self) -> None:
+        self._live_session_id = None
+        self._subscribed_session = None
+
+    def handshake_requests(self) -> list[dict[str, Any]]:
+        return []
+
+    def next_setup_message(
+        self,
+        *,
+        session_id: str | None,
+        model: str | None,
+        reasoning_effort: str | None,
+        workdir: Path,
+        model_provider: str | None = None,
+    ) -> dict[str, Any] | None:
+        """``session/create`` for a new conversation, ``session/resume`` for
+        one adopted from a previous server process, then
+        ``session/subscribe`` — delivery only flows to subscribed sessions,
+        and the id to subscribe to is only known after the create/resume
+        response, hence the pull-based chain."""
+        if session_id is None and self._live_session_id is None:
+            return {
+                "method": "session/create",
+                "params": {
+                    "workspace": {"workspacePath": str(workdir), "workspaceKey": str(workdir)},
+                    "mode": "yolo",
+                },
+            }
+        if session_id is not None and session_id != self._live_session_id:
+            return {"method": "session/resume", "params": {"sessionId": session_id}}
+        if session_id is not None and self._subscribed_session != session_id:
+            # The delivery kind the desktop host uses: live, no replay.
+            self._subscribed_session = session_id
+            return {
+                "method": "session/subscribe",
+                "params": {
+                    "sessionId": session_id,
+                    "deliveryKind": "desktop-continuous",
+                    "includeSnapshot": False,
+                },
+            }
+        return None
+
+    def turn_start_message(
+        self,
+        *,
+        session_id: str | None,
+        prompt_text: str,
+        model: str | None,
+        reasoning_effort: str | None,
+        model_provider: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not session_id:
+            return None
+        params: dict[str, Any] = {"sessionId": session_id, "content": prompt_text}
+        if model_provider:
+            # The routed gateway rides the per-turn selection — the protocol
+            # seam for what the one-shot path writes into defaultModelSelection.
+            resolved = find_provider_for_model(model or "", load_custom_providers())
+            if resolved is not None:
+                params["modelSelection"] = zcode_model_selection(*resolved, reasoning_effort)
+        return {"method": "session/send", "params": params}
+
+    def adopt_response_id(self, response: dict[str, Any]) -> str | None:
+        # create and resume both answer with a state snapshot.
+        result = response.get("result")
+        snapshot = result.get("session") if isinstance(result, dict) else None
+        session_id = snapshot.get("sessionId") if isinstance(snapshot, dict) else None
+        if isinstance(session_id, str) and session_id:
+            self._live_session_id = session_id
+            return session_id
+        return None
+
+    def parse_server_message(self, message: dict[str, Any], state: CliTurnState) -> list[Any]:
+        if message.get("method") != "session/event":
+            return []
+        event = message.get("params")
+        if not isinstance(event, dict):
+            return []
+        kind = event.get("type")
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if kind == "part.delta":
+            if payload.get("field") in (None, "text") and isinstance(payload.get("delta"), str):
+                return append_text_events(state, payload["delta"])
+            return []
+        if kind == "tool.updated":
+            return self._tool_updated_events(payload, state)
+        if kind == "turn.completed":
+            events = text_events(state, str(payload.get("response") or ""))
+            usage = payload.get("usage")
+            if isinstance(usage, dict):
+                state.tokens = _usage_tokens(usage)
+            state.completed = True
+            raise CliTurnSettled(events)
+        if kind == "turn.failed":
+            detail = _error_text(payload.get("error")) or "ZCode turn failed"
+            raise CliTurnSettled(error_event(state, detail))
+        return []
+
+    def _tool_updated_events(self, payload: dict[str, Any], state: CliTurnState) -> list[Any]:
+        call_id = str(payload.get("toolCallId") or "tool")
+        kind = payload.get("kind")
+        if kind in ("scheduled", "started"):
+            args = payload.get("input") if isinstance(payload.get("input"), dict) else {}
+            return tool_events(
+                state,
+                call_id=call_id,
+                name=str(payload.get("toolName") or "tool"),
+                args=args,
+                status="running",
+            )
+        if kind == "result":
+            return tool_events(
+                state,
+                call_id=call_id,
+                name="",
+                args=None,
+                status="completed",
+                output=_result_text(payload.get("result")),
+            )
+        if kind == "error":
+            return tool_events(
+                state,
+                call_id=call_id,
+                name="",
+                args=None,
+                status="error",
+                output=_error_text(payload.get("error")),
+            )
+        return []
+
+    def interrupt_messages(
+        self, *, session_id: str | None, state: CliTurnState | None
+    ) -> list[dict[str, Any]]:
+        if not session_id:
+            return []
+        return [{"method": "session/stop", "params": {"sessionId": session_id}}]
+
+    def server_request_messages(self, message: dict[str, Any]) -> list[dict[str, Any]]:
+        request_id = message.get("id")
+        method = message.get("method")
+        if not (isinstance(request_id, str) and isinstance(method, str)):
+            return []
+        if method == "interaction/requestPermission":
+            # Unattended: deny so the turn continues past the refused tool —
+            # the same answer ZCode's own headless broker gives.
+            return [{"id": request_id, "result": {"decision": "deny"}}]
+        if method == "interaction/requestUserInput":
+            # A schema-valid cancel declines the question gracefully (the
+            # broker maps it to a deny the model sees and works around); an
+            # error frame would instead reject the broker's promise.
+            return [{"id": request_id, "result": {"action": "cancel"}}]
+        return [_jsonrpc_unattended_reply_error(request_id, method)]
+
     def parse_record(self, record: dict[str, Any], state: CliTurnState) -> list[Any]:
         return []
 
@@ -520,7 +915,6 @@ class ZcodeVendor:
 _VENDORS: dict[HarnessId, type[Any]] = {
     HarnessId.CODEX: CodexVendor,
     HarnessId.PI: PiVendor,
-    HarnessId.DSH: DshVendor,
     HarnessId.ZCODE: ZcodeVendor,
 }
 
@@ -583,7 +977,6 @@ def _default_exit_outcome(
 
 __all__ = [
     "CodexVendor",
-    "DshVendor",
     "PiVendor",
     "ZcodeVendor",
     "get_cli_vendor",

@@ -3,12 +3,13 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from sandbox_runtime.custom_providers import codex_model_catalog_path, load_custom_providers
 from sandbox_runtime.harness.base import HarnessId, TurnOutcome
-from sandbox_runtime.harness.cli_harness import CliTurnState
+from sandbox_runtime.harness.cli_harness import CliTurnSettled, CliTurnState
 from sandbox_runtime.harness.cli_vendors import (
     CodexVendor,
-    DshVendor,
     PiVendor,
     ZcodeVendor,
     get_cli_vendor,
@@ -25,10 +26,438 @@ def _types(events: list[dict]) -> list[str]:
     return [event["type"] for event in events]
 
 
+class TestCodexAppServer:
+    """Resident app-server mode: request building and envelope translation."""
+
+    def test_setup_starts_a_thread_with_the_routed_gateway(self) -> None:
+        vendor = CodexVendor()
+        message = vendor.next_setup_message(
+            session_id=None,
+            model="cpo-55443322/gpt-x",
+            reasoning_effort=None,
+            workdir=WORKDIR,
+            model_provider="cpo-55443322",
+        )
+        assert message is not None
+        assert message["method"] == "thread/start"
+        params = message["params"]
+        assert params["modelProvider"] == "cpo-55443322"
+        assert params["model"] == "gpt-x"
+        assert params["config"]["model_catalog_json"].endswith("custom-models.json")
+
+    def test_setup_resumes_an_adopted_thread_only_once(self) -> None:
+        vendor = CodexVendor()
+        message = vendor.next_setup_message(
+            session_id="t-9",
+            model=None,
+            reasoning_effort=None,
+            workdir=WORKDIR,
+            model_provider="cpo-55443322",
+        )
+        assert message is not None
+        assert message["method"] == "thread/resume"
+        assert message["params"]["threadId"] == "t-9"
+        vendor.adopt_response_id({"result": {"thread": {"id": "t-9"}}})
+        # The thread this process created is live: no setup on later turns.
+        assert (
+            vendor.next_setup_message(
+                session_id="t-9",
+                model=None,
+                reasoning_effort=None,
+                workdir=WORKDIR,
+                model_provider="cpo-55443322",
+            )
+            is None
+        )
+        # A restarted server process knows no thread: the id resumes again.
+        vendor.reset()
+        message = vendor.next_setup_message(
+            session_id="t-9",
+            model=None,
+            reasoning_effort=None,
+            workdir=WORKDIR,
+            model_provider=None,
+        )
+        assert message is not None
+        assert message["method"] == "thread/resume"
+
+    def test_turn_start_carries_prompt_model_and_effort(self) -> None:
+        vendor = CodexVendor()
+        message = vendor.turn_start_message(
+            session_id="t-1",
+            prompt_text="hi",
+            model="cpo-55443322/gpt-x",
+            reasoning_effort="high",
+        )
+        assert message is not None
+        params = message["params"]
+        assert params["threadId"] == "t-1"
+        assert params["input"] == [{"type": "text", "text": "hi"}]
+        assert params["model"] == "gpt-x"
+        assert params["effort"] == "high"
+        assert (
+            vendor.turn_start_message(
+                session_id=None, prompt_text="hi", model=None, reasoning_effort=None
+            )
+            is None
+        )
+
+    def test_notifications_translate_through_the_exec_shapes(self) -> None:
+        vendor = CodexVendor()
+        state = _state()
+        assert (
+            vendor.parse_server_message(
+                {
+                    "method": "turn/started",
+                    "params": {"threadId": "t-1", "turn": {"id": "turn-7"}},
+                },
+                state,
+            )
+            == []
+        )
+        assert state.server_turn_id == "turn-7"
+
+        events = vendor.parse_server_message(
+            {
+                "method": "item/completed",
+                "params": {"item": {"id": "i2", "type": "agentMessage", "text": "done"}},
+            },
+            state,
+        )
+        assert events[-1]["type"] == "token" and events[-1]["content"] == "done"
+
+        with pytest.raises(CliTurnSettled) as settled:
+            vendor.parse_server_message(
+                {
+                    "method": "turn/completed",
+                    "params": {"threadId": "t-1", "turn": {"usage": {"input_tokens": 3}}},
+                },
+                state,
+            )
+        assert state.completed
+        assert state.tokens == {"input_tokens": 3}
+        # The step already fired at the first output; the sentinel may carry
+        # no further events — the harness emits whatever rides it either way.
+        assert isinstance(settled.value.events, list)
+
+    def test_turn_failed_settles_with_the_error_event(self) -> None:
+        vendor = CodexVendor()
+        state = _state()
+        with pytest.raises(CliTurnSettled) as settled:
+            vendor.parse_server_message(
+                {
+                    "method": "turn/failed",
+                    "params": {"threadId": "t-1", "error": {"message": "boom"}},
+                },
+                state,
+            )
+        assert settled.value.events[0]["type"] == "error"
+
+    def test_interrupt_uses_the_running_turn_id(self) -> None:
+        vendor = CodexVendor()
+        state = _state()
+        assert vendor.interrupt_messages(session_id="t-1", state=state) == []
+        state.server_turn_id = "turn-7"
+        (message,) = vendor.interrupt_messages(session_id="t-1", state=state)
+        assert message["method"] == "turn/interrupt"
+        assert message["params"] == {"threadId": "t-1", "turnId": "turn-7"}
+
+    def test_server_requests_get_an_error_reply(self) -> None:
+        vendor = CodexVendor()
+        (reply,) = vendor.server_request_messages({"id": "server-1", "method": "agent/ask"})
+        assert reply["id"] == "server-1"
+        assert reply["error"]["code"] == -32601
+        assert vendor.server_request_messages({"method": "turn/started"}) == []
+
+
+class TestPiRpc:
+    """Resident rpc mode: spawn argv, setup chain, and event translation."""
+
+    def test_server_argv_carries_session_model_and_thinking(self) -> None:
+        vendor = PiVendor()
+        assert vendor.server_argv(
+            session_id="s-1", model="cpo-55443322/gpt-x", reasoning_effort="none"
+        ) == [
+            "--mode",
+            "rpc",
+            "--approve",
+            "--session-id",
+            "s-1",
+            "--model",
+            "cpo-55443322/gpt-x",
+            "--thinking",
+            "off",
+        ]
+
+    def test_setup_probes_then_applies_model_and_thinking_once(self) -> None:
+        vendor = PiVendor()
+        assert vendor.next_setup_message(
+            session_id="s-1",
+            model="cpo-55443322/gpt-x",
+            reasoning_effort="high",
+            workdir=WORKDIR,
+        ) == {"type": "get_state"}
+        assert vendor.next_setup_message(
+            session_id="s-1",
+            model="cpo-55443322/gpt-x",
+            reasoning_effort="high",
+            workdir=WORKDIR,
+        ) == {"type": "set_model", "provider": "cpo-55443322", "modelId": "gpt-x"}
+        assert vendor.next_setup_message(
+            session_id="s-1",
+            model="cpo-55443322/gpt-x",
+            reasoning_effort="high",
+            workdir=WORKDIR,
+        ) == {"type": "set_thinking_level", "level": "high"}
+        # Converged: nothing more to send this turn, and nothing on the next.
+        assert (
+            vendor.next_setup_message(
+                session_id="s-1",
+                model="cpo-55443322/gpt-x",
+                reasoning_effort="high",
+                workdir=WORKDIR,
+            )
+            is None
+        )
+        # A model switch mid-conversation goes through set_model again.
+        assert vendor.next_setup_message(
+            session_id="s-1", model="anthropic/claude-x", reasoning_effort=None, workdir=WORKDIR
+        ) == {"type": "set_model", "provider": "anthropic", "modelId": "claude-x"}
+
+    def test_reset_reprobes_after_a_restart(self) -> None:
+        vendor = PiVendor()
+        vendor.next_setup_message(
+            session_id=None, model=None, reasoning_effort=None, workdir=WORKDIR
+        )
+        vendor.reset()
+        assert vendor.next_setup_message(
+            session_id="s-1", model=None, reasoning_effort=None, workdir=WORKDIR
+        ) == {"type": "get_state"}
+
+    def test_adopt_and_turn_start(self) -> None:
+        vendor = PiVendor()
+        assert (
+            vendor.adopt_response_id(
+                {"type": "response", "command": "get_state", "data": {"sessionId": "s-7"}}
+            )
+            == "s-7"
+        )
+        assert vendor.adopt_response_id({"type": "response", "command": "prompt"}) is None
+        assert vendor.turn_start_message(
+            session_id="s-7", prompt_text="hi", model=None, reasoning_effort=None
+        ) == {"type": "prompt", "message": "hi"}
+        assert (
+            vendor.turn_start_message(
+                session_id=None, prompt_text="hi", model=None, reasoning_effort=None
+            )
+            is None
+        )
+
+    def test_events_translate_and_agent_settled_ends_the_turn(self) -> None:
+        vendor = PiVendor()
+        state = _state()
+        assert vendor.parse_server_message({"type": "response", "command": "prompt"}, state) == []
+        events = vendor.parse_server_message(
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "delta": "Hi"},
+            },
+            state,
+        )
+        assert events[-1]["type"] == "token" and events[-1]["content"] == "Hi"
+        with pytest.raises(CliTurnSettled):
+            vendor.parse_server_message({"type": "agent_settled"}, state)
+        assert state.completed
+
+    def test_interrupt_and_extension_ui_reply(self) -> None:
+        vendor = PiVendor()
+        assert vendor.interrupt_messages(session_id="s-1", state=_state()) == [{"type": "abort"}]
+        assert vendor.server_request_messages(
+            {"type": "extension_ui_request", "id": "ext-1", "method": "confirm"}
+        ) == [{"type": "extension_ui_response", "id": "ext-1", "cancelled": True}]
+        assert vendor.server_request_messages({"type": "message_update"}) == []
+
+
+class TestZcodeAppServer:
+    """Resident app-server mode: setup chain, events, interrupts, replies."""
+
+    def _session_event(self, event_type: str, payload: dict | None = None) -> dict:
+        return {"method": "session/event", "params": {"type": event_type, "payload": payload or {}}}
+
+    def test_setup_creates_then_subscribes_with_the_adopted_id(self) -> None:
+        vendor = ZcodeVendor()
+        create = vendor.next_setup_message(
+            session_id=None, model=None, reasoning_effort=None, workdir=WORKDIR
+        )
+        assert create is not None
+        assert create["method"] == "session/create"
+        assert create["params"]["workspace"] == {
+            "workspacePath": str(WORKDIR),
+            "workspaceKey": str(WORKDIR),
+        }
+        assert create["params"]["mode"] == "yolo"
+        assert vendor.adopt_response_id({"result": {"session": {"sessionId": "z-1"}}}) == "z-1"
+        subscribe = vendor.next_setup_message(
+            session_id="z-1", model=None, reasoning_effort=None, workdir=WORKDIR
+        )
+        assert subscribe is not None
+        assert subscribe["method"] == "session/subscribe"
+        assert subscribe["params"]["sessionId"] == "z-1"
+        assert subscribe["params"]["deliveryKind"] == "desktop-continuous"
+        # Converged for this process.
+        assert (
+            vendor.next_setup_message(
+                session_id="z-1", model=None, reasoning_effort=None, workdir=WORKDIR
+            )
+            is None
+        )
+
+    def test_setup_resumes_after_a_restart(self) -> None:
+        vendor = ZcodeVendor()
+        vendor.reset()
+        resume = vendor.next_setup_message(
+            session_id="z-1", model=None, reasoning_effort=None, workdir=WORKDIR
+        )
+        assert resume is not None
+        assert resume["method"] == "session/resume"
+        assert resume["params"] == {"sessionId": "z-1"}
+        vendor.adopt_response_id({"result": {"session": {"sessionId": "z-1"}}})
+        subscribe = vendor.next_setup_message(
+            session_id="z-1", model=None, reasoning_effort=None, workdir=WORKDIR
+        )
+        assert subscribe is not None
+        assert subscribe["method"] == "session/subscribe"
+
+    def test_turn_start_sends_content_with_the_routed_selection(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        TestZcode()._stage_custom_provider(tmp_path, monkeypatch)
+        vendor = ZcodeVendor()
+        message = vendor.turn_start_message(
+            session_id="z-1",
+            prompt_text="task",
+            model="cpa-00112233/glm-4.7",
+            reasoning_effort=None,
+            model_provider="cpa-00112233",
+        )
+        assert message is not None
+        assert message["method"] == "session/send"
+        assert message["params"]["content"] == "task"
+        selection = message["params"]["modelSelection"]
+        assert selection["providerId"] == "cpa-00112233"
+        assert selection["modelId"] == "glm-4.7"
+
+    def test_turn_start_without_a_route_has_no_selection(self) -> None:
+        vendor = ZcodeVendor()
+        message = vendor.turn_start_message(
+            session_id="z-1",
+            prompt_text="task",
+            model="zai-coding-plan/glm-5.3",
+            reasoning_effort=None,
+        )
+        assert message is not None
+        assert "modelSelection" not in message["params"]
+        assert (
+            vendor.turn_start_message(
+                session_id=None, prompt_text="task", model=None, reasoning_effort=None
+            )
+            is None
+        )
+
+    def test_events_translate_text_tools_and_terminal(self) -> None:
+        vendor = ZcodeVendor()
+        state = _state()
+        events = vendor.parse_server_message(
+            self._session_event("part.delta", {"field": "text", "delta": "Hel"}), state
+        )
+        assert events[-1]["type"] == "token" and events[-1]["content"] == "Hel"
+        # Reasoning deltas are not surfaced yet.
+        assert (
+            vendor.parse_server_message(
+                self._session_event("part.delta", {"field": "reasoning", "delta": "hm"}), state
+            )
+            == []
+        )
+
+        events = vendor.parse_server_message(
+            self._session_event(
+                "tool.updated",
+                {
+                    "kind": "started",
+                    "toolCallId": "c1",
+                    "toolName": "bash",
+                    "input": {"command": "ls"},
+                },
+            ),
+            state,
+        )
+        assert events[-1]["type"] == "tool_call" and events[-1]["status"] == "running"
+        events = vendor.parse_server_message(
+            self._session_event(
+                "tool.updated", {"kind": "result", "toolCallId": "c1", "result": {"text": "ok"}}
+            ),
+            state,
+        )
+        assert events[-1]["status"] == "completed" and events[-1]["output"] == "ok"
+        events = vendor.parse_server_message(
+            self._session_event(
+                "tool.updated",
+                {"kind": "error", "toolCallId": "c1", "error": {"message": "denied"}},
+            ),
+            state,
+        )
+        assert events[-1]["status"] == "error" and events[-1]["output"] == "denied"
+
+        with pytest.raises(CliTurnSettled) as settled:
+            vendor.parse_server_message(
+                self._session_event(
+                    "turn.completed",
+                    {"response": "Hello", "usage": {"input_tokens": 5, "junk": True}},
+                ),
+                state,
+            )
+        assert state.completed
+        assert state.tokens == {"input_tokens": 5}
+        assert settled.value.events[-1]["type"] == "token"
+        assert settled.value.events[-1]["content"] == "Hello"
+
+    def test_turn_failed_settles_with_the_error_event(self) -> None:
+        vendor = ZcodeVendor()
+        state = _state()
+        with pytest.raises(CliTurnSettled) as settled:
+            vendor.parse_server_message(
+                self._session_event("turn.failed", {"error": {"message": "boom"}}), state
+            )
+        assert settled.value.events[0]["type"] == "error"
+
+    def test_interrupt_stops_the_session(self) -> None:
+        vendor = ZcodeVendor()
+        assert vendor.interrupt_messages(session_id=None, state=_state()) == []
+        (message,) = vendor.interrupt_messages(session_id="z-1", state=_state())
+        assert message["method"] == "session/stop"
+        assert message["params"] == {"sessionId": "z-1"}
+
+    def test_permission_requests_are_denied_and_others_errored(self) -> None:
+        vendor = ZcodeVendor()
+        assert vendor.server_request_messages(
+            {"id": "server-1", "method": "interaction/requestPermission"}
+        ) == [{"id": "server-1", "result": {"decision": "deny"}}]
+        # A user-input question is declined, not errored: the broker maps a
+        # cancel to a graceful deny instead of a rejected promise.
+        assert vendor.server_request_messages(
+            {"id": "server-3", "method": "interaction/requestUserInput"}
+        ) == [{"id": "server-3", "result": {"action": "cancel"}}]
+        (reply,) = vendor.server_request_messages(
+            {"id": "server-2", "method": "interaction/requestProviderRuntimeHeaders"}
+        )
+        assert reply["id"] == "server-2"
+        assert reply["error"]["code"] == -32601
+        assert vendor.server_request_messages({"method": "session/event"}) == []
+
+
 def test_registry_lists_only_cli_harnesses() -> None:
     assert isinstance(get_cli_vendor(HarnessId.CODEX), CodexVendor)
     assert isinstance(get_cli_vendor(HarnessId.PI), PiVendor)
-    assert isinstance(get_cli_vendor(HarnessId.DSH), DshVendor)
     assert isinstance(get_cli_vendor(HarnessId.ZCODE), ZcodeVendor)
     assert get_cli_vendor(HarnessId.OPENCODE) is None
     assert get_cli_vendor(HarnessId.CLAUDE) is None
@@ -306,71 +735,6 @@ class TestPi:
             state,
         )
         assert events == [{"type": "token", "content": "Hello", "messageId": "m1"}]
-
-
-class TestDsh:
-    def test_resume_argv_and_extra_env(self) -> None:
-        vendor = DshVendor()
-        argv = vendor.build_argv(
-            session_id="sess-9",
-            prompt_text="task",
-            model="deepseek/deepseek-v4-pro",
-            reasoning_effort=None,
-            workdir=WORKDIR,
-        )
-        assert argv[:3] == ["--profile", "headless", "--json"]
-        assert argv[argv.index("--session-id") + 1] == "sess-9"
-        assert argv[-1] == "task"
-        assert vendor.extra_env(model="deepseek/deepseek-v4-pro") == {
-            "DSH_MODEL": "deepseek-v4-pro"
-        }
-        assert vendor.extra_env(model=None) == {}
-
-    def test_translates_session_text_tools_and_final(self) -> None:
-        vendor = DshVendor()
-        state = _state()
-        vendor.parse_record({"type": "session", "sessionId": "d-1", "cwd": "/workspace"}, state)
-        assert state.session_id == "d-1"
-
-        events = vendor.parse_record({"type": "text", "text": "wor"}, state)
-        assert events[-1]["type"] == "token"
-        # Record shapes per dsh-headless's projection (0.1.7-rc.2): the name
-        # rides `tool`, the arguments `input`, and result records carry no
-        # name at all — the learned one must survive the completing event.
-        events = vendor.parse_record(
-            {"type": "tool_call", "callId": "c", "tool": "bash", "input": {"command": "ls"}},
-            state,
-        )
-        assert events[-1]["type"] == "tool_call"
-        assert events[-1]["tool"] == "bash"
-        assert events[-1]["args"] == {"command": "ls"}
-        events = vendor.parse_record(
-            {"type": "tool_result", "callId": "c", "status": "completed", "result": "ok"}, state
-        )
-        assert events[-1]["tool"] == "bash"
-        assert events[-1]["status"] == "completed"
-
-        events = vendor.parse_record({"type": "final", "text": "world"}, state)
-        assert events[-1] == {"type": "token", "content": "world", "messageId": "m1"}
-        assert state.completed
-
-    def test_tool_result_error_status_is_preserved(self) -> None:
-        vendor = DshVendor()
-        state = _state()
-        vendor.parse_record(
-            {"type": "tool_call", "callId": "c", "tool": "bash", "input": {"command": "ls"}},
-            state,
-        )
-        events = vendor.parse_record(
-            {"type": "tool_result", "callId": "c", "status": "error", "result": "denied"}, state
-        )
-        assert events[-1]["tool"] == "bash"
-        assert events[-1]["status"] == "error"
-        assert events[-1]["output"] == "denied"
-
-    def test_error_record(self) -> None:
-        events = DshVendor().parse_record({"type": "error", "message": "nope"}, _state())
-        assert events[0]["type"] == "error" and events[0]["error"] == "nope"
 
 
 class TestZcode:
