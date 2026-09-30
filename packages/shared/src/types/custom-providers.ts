@@ -21,6 +21,17 @@ export const CUSTOM_PROVIDER_PROTOCOLS = [
 export type CustomProviderProtocol = (typeof CUSTOM_PROVIDER_PROTOCOLS)[number];
 export const customProviderProtocolSchema = z.enum(CUSTOM_PROVIDER_PROTOCOLS);
 
+/**
+ * UI label for each wire protocol, shared by the settings form and every
+ * model picker. The two OpenAI protocols must read apart: Codex gateways run
+ * Responses only, and collapsing them hides which protocol a model routes on.
+ */
+export const CUSTOM_PROVIDER_PROTOCOL_LABELS: Record<CustomProviderProtocol, string> = {
+  anthropic: "Anthropic Messages API",
+  openai_compatible: "OpenAI chat completions",
+  openai_responses: "OpenAI Responses API",
+};
+
 /** Custom provider IDs use the installation's canonical 16-byte hex ID format. */
 export const CUSTOM_PROVIDER_ID_PATTERN = /^[0-9a-f]{32}$/;
 export const customProviderIdSchema = z.string().regex(CUSTOM_PROVIDER_ID_PATTERN);

@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import {
   CUSTOM_MODEL_MODALITIES,
   CUSTOM_MODEL_REASONING_EFFORTS,
+  CUSTOM_PROVIDER_PROTOCOL_LABELS,
   type CustomModelRecord,
   type CustomProviderHeader,
   type CustomProviderProtocol,
@@ -25,12 +26,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-
-const PROTOCOL_LABELS: Record<CustomProviderProtocol, string> = {
-  anthropic: "Anthropic Messages API",
-  openai_compatible: "OpenAI-compatible (chat completions)",
-  openai_responses: "OpenAI Responses API",
-};
 
 interface ImportedModelDraft {
   modelId: string;
@@ -254,11 +249,13 @@ function ProviderDialog({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {(Object.keys(PROTOCOL_LABELS) as CustomProviderProtocol[]).map((value) => (
-                    <SelectItem key={value} value={value}>
-                      {PROTOCOL_LABELS[value]}
-                    </SelectItem>
-                  ))}
+                  {(Object.keys(CUSTOM_PROVIDER_PROTOCOL_LABELS) as CustomProviderProtocol[]).map(
+                    (value) => (
+                      <SelectItem key={value} value={value}>
+                        {CUSTOM_PROVIDER_PROTOCOL_LABELS[value]}
+                      </SelectItem>
+                    )
+                  )}
                 </SelectContent>
               </Select>
             </div>
@@ -627,7 +624,7 @@ export function CustomProvidersSettings() {
                 <h3 className="text-sm font-semibold text-foreground">
                   {provider.name}{" "}
                   <span className="font-normal text-muted-foreground">
-                    · {PROTOCOL_LABELS[provider.protocol]} · {provider.providerKey}
+                    · {CUSTOM_PROVIDER_PROTOCOL_LABELS[provider.protocol]} · {provider.providerKey}
                   </span>
                 </h3>
                 <p className="text-xs text-muted-foreground">{provider.baseUrl}</p>

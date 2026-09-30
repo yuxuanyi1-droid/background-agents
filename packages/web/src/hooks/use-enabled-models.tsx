@@ -12,7 +12,10 @@ import {
   type ModelCategory,
   type ModelPreferenceChange,
 } from "@open-inspect/shared/models";
-import { customModelRecordSchema } from "@open-inspect/shared/types/custom-providers";
+import {
+  CUSTOM_PROVIDER_PROTOCOL_LABELS,
+  customModelRecordSchema,
+} from "@open-inspect/shared/types/custom-providers";
 import { browserApiFetch } from "@/lib/browser-api-fetch";
 
 export const MODEL_PREFERENCES_KEY = "/api/model-preferences";
@@ -64,7 +67,7 @@ export function useEnabledModels(): {
       group.models.push({
         id: model.id,
         name: model.displayName,
-        description: `${model.providerName} · ${model.protocol === "anthropic" ? "Anthropic" : "OpenAI-compatible"} protocol`,
+        description: `${model.providerName} · ${CUSTOM_PROVIDER_PROTOCOL_LABELS[model.protocol]}`,
         reasoningEfforts: model.reasoningEfforts,
         protocol: model.protocol,
       });

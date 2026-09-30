@@ -171,6 +171,55 @@ describe("useEnabledModels", () => {
     expect(result.current.saving).toBe(false);
   });
 
+  it("labels each custom model with its own wire protocol", async () => {
+    const fetcher = vi.fn(async (key: string) =>
+      key === MODEL_PREFERENCES_KEY
+        ? { enabledModels: ["openai/gpt-5.4"], revision: 1 }
+        : {
+            models: [
+              {
+                id: "cpo-99887766/gpt-x",
+                providerId: "99887766554433221100ffeeddccbbaa",
+                providerName: "Responses Gateway",
+                protocol: "openai_responses",
+                modelId: "gpt-x",
+                displayName: "GPT X",
+                modalities: ["text"],
+                reasoningEfforts: ["high"],
+                contextWindowTokens: 400_000,
+                maxOutputTokens: 65_536,
+                enabled: true,
+              },
+              {
+                id: "cpo-00112233/glm-5",
+                providerId: "00112233445566778899aabbccddeeff",
+                providerName: "Chat Gateway",
+                protocol: "openai_compatible",
+                modelId: "glm-5",
+                displayName: "GLM 5",
+                modalities: ["text"],
+                reasoningEfforts: [],
+                contextWindowTokens: 128_000,
+                maxOutputTokens: 16_384,
+                enabled: true,
+              },
+            ],
+          }
+    );
+    const { result } = renderHook(() => useEnabledModels(), {
+      wrapper: ({ children }) => (
+        <SWRConfig value={{ provider: () => new Map(), fetcher }}>{children}</SWRConfig>
+      ),
+    });
+
+    await waitFor(() => expect(result.current.customModelOptions.length).toBeGreaterThan(0));
+    const descriptions = result.current.customModelOptions.flatMap((group) =>
+      group.models.map((model) => model.description)
+    );
+    expect(descriptions).toContain("Responses Gateway · OpenAI Responses API");
+    expect(descriptions).toContain("Chat Gateway · OpenAI chat completions");
+  });
+
   it("dispatches the model preferences and custom models resources through the global fetcher", async () => {
     const fetcher = vi.fn(async (key: string) =>
       key === MODEL_PREFERENCES_KEY

@@ -60,7 +60,7 @@ const items = [
       {
         id: "cpo-1a2b3c4d/gpt-5.6-luna",
         name: "Gateway Luna",
-        description: "My Gateway · OpenAI-compatible protocol",
+        description: "My Gateway · OpenAI Responses API",
       },
     ],
   },
