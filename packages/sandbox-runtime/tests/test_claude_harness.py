@@ -40,6 +40,7 @@ from sandbox_runtime.credentials.provider_credential_client import (
 from sandbox_runtime.harness import AgentHarness, HarnessPrompt, HarnessStartError, PromptLimits
 from sandbox_runtime.harness.claude import (
     AUTHENTICATION_FAILED_MESSAGE,
+    MAX_RECONNECTS_PER_SESSION,
     MAX_STDOUT_MESSAGE_BYTES,
     ClaudeHarness,
     ClaudeHarnessConfig,
@@ -902,19 +903,32 @@ class TestReconnectPolicy:
         assert h.clients[1].options["resume"] == h.harness.session_id
 
     @pytest.mark.asyncio
-    async def test_reconnect_budget_is_three_per_session(self, tmp_path: Path) -> None:
-        h = Harness(tmp_path, turns=[[_result(0.1)] for _ in range(6)])
+    async def test_successful_reconnects_restore_the_budget(self, tmp_path: Path) -> None:
+        h = Harness(tmp_path, turns=[[_result(0.1)] for _ in range(8)])
         await h.harness.open()
         await h.harness.create_session()
         await _run(h.harness)
-        for _ in range(3):
+        # The budget bounds consecutive failures, not lifetime reconnect
+        # events: every successful connect resets it.
+        for _ in range(MAX_RECONNECTS_PER_SESSION + 4):
             h.harness._needs_reconnect = True
             _, outcome = await _run(h.harness)
             assert outcome.success is True
-        h.harness._needs_reconnect = True
-        _, outcome = await _run(h.harness)
-        assert outcome.success is False
-        assert "repeatedly" in (outcome.error or "")
+
+    @pytest.mark.asyncio
+    async def test_preservation_stops_do_not_exhaust_the_reconnect_budget(
+        self, tmp_path: Path
+    ) -> None:
+        # A persistent-resume sandbox (E2B/Daytona pause) drains the runtime
+        # once per TTL window; every drain calls stop_execution, which flags a
+        # reconnect. Those planned stops must never brick the session.
+        h = Harness(tmp_path, turns=[[_result(0.1)] for _ in range(8)])
+        await h.harness.open()
+        await h.harness.create_session()
+        for _ in range(MAX_RECONNECTS_PER_SESSION + 4):
+            assert await h.harness.stop_execution(1.0) is True
+            _, outcome = await _run(h.harness)
+            assert outcome.success is True
 
     @pytest.mark.asyncio
     async def test_failed_connects_spend_the_reconnect_budget(self, tmp_path: Path) -> None:

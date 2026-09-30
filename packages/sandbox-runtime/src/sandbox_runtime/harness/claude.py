@@ -513,7 +513,12 @@ class ClaudeHarness:
             return self._client
         if self._needs_reconnect:
             # Spent whether or not the previous attempt produced a client: a
-            # connect that fails or hangs still counts against the budget.
+            # connect that fails or hangs still counts against the budget. The
+            # budget is only reset by a successful connect below, so it bounds
+            # consecutive failures, not the lifetime reconnect count — a
+            # persistent-resume sandbox (E2B/Daytona pause) drains and resumes
+            # the same harness process once per TTL window, and those planned
+            # reconnects must stay free.
             self._reconnects += 1
             if self._reconnects > MAX_RECONNECTS_PER_SESSION:
                 raise RuntimeError(
@@ -532,6 +537,10 @@ class ClaudeHarness:
         self._connected_model = model
         self._connected_effort = reasoning_effort
         self._needs_reconnect = False
+        # A successful connect proves the disconnect that flagged the reconnect
+        # was recovered from, so consecutive failures — not lifetime reconnect
+        # events — are what the budget bounds.
+        self._reconnects = 0
         # A fresh child starts its running total at zero (§5.3 baseline rule).
         self._cost_baseline = 0.0
         self.log.info(
