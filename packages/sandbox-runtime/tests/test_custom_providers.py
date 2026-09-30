@@ -354,6 +354,41 @@ def test_dsh_patch_declares_routes_and_selection():
     assert dsh_model_selection_patch("cpo-99887766", "glm-4.7", None).count("\n") == 4
 
 
+@pytest.mark.parametrize(
+    "registered,expected",
+    [
+        ("https://gateway.example/api/anthropic/", "https://gateway.example/api/anthropic"),
+        ("https://gateway.example/api/anthropic/v1", "https://gateway.example/api/anthropic"),
+        ("https://gateway.example/api/anthropic/v1/", "https://gateway.example/api/anthropic"),
+    ],
+)
+def test_pi_and_dsh_write_anthropic_gateways_at_the_api_root(registered: str, expected: str):
+    """pi-ai's Anthropic client joins ``/v1/messages`` itself, so both CLIs'
+    configs carry the API root — a registered version segment would be
+    requested twice. OpenAI gateways keep the segment (their clients append
+    only the wire path)."""
+    from sandbox_runtime.custom_providers import dsh_profile_patch_entries, pi_models_document
+
+    manifest = anthropic_manifest()
+    manifest["baseUrl"] = registered
+    providers = load_custom_providers(manifest_env(manifest))
+
+    pi_url = pi_models_document(providers)["providers"]["cpa-00112233"]["baseUrl"]
+    assert pi_url == expected
+
+    dsh_text = "\n".join(dsh_profile_patch_entries(providers))
+    assert f'baseURL: "{expected}"' in dsh_text
+
+    openai_providers = load_custom_providers(manifest_env(openai_manifest()))
+    assert (
+        pi_models_document(openai_providers)["providers"]["cpo-99887766"]["baseUrl"]
+        == "https://gateway.example/v1"
+    )
+    assert 'baseURL: "https://gateway.example/v1"' in "\n".join(
+        dsh_profile_patch_entries(openai_providers)
+    )
+
+
 def test_write_dsh_profile_patch_regenerates(tmp_path: Path):
     from sandbox_runtime.custom_providers import write_dsh_profile_patch
 

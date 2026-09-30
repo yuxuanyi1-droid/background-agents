@@ -209,19 +209,26 @@ def opencode_provider_config(providers: tuple[CustomProvider, ...]) -> dict[str,
     return config
 
 
-def custom_anthropic_env(provider: CustomProvider) -> dict[str, str]:
-    """The Anthropic credential env a Claude child needs for a custom gateway.
+def anthropic_root_base_url(base_url: str) -> str:
+    """The base URL an Anthropic-protocol client wants: the API root.
 
-    Claude Code appends ``/v1/messages`` itself, so a base URL registered with
-    a trailing ``/v1`` (the SDK-style form gateways also document for their
-    model-list endpoints) would be requested at ``/v1/v1/messages``. Strip the
-    version segment so both registration styles reach the gateway.
+    Anthropic clients (Claude Code, the SDK pi-ai embeds, hence both the Pi
+    and dsh harnesses) append ``/v1/messages`` themselves, so a base URL
+    registered with a trailing ``/v1`` — the SDK-style form gateways also
+    document for their model-list endpoints — would be requested at
+    ``/v1/v1/messages``. Strip the version segment so both registration
+    styles reach the gateway.
     """
-    base_url = provider.base_url.rstrip("/")
-    if base_url.endswith("/v1"):
-        base_url = base_url[: -len("/v1")].rstrip("/")
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[: -len("/v1")].rstrip("/")
+    return root
+
+
+def custom_anthropic_env(provider: CustomProvider) -> dict[str, str]:
+    """The Anthropic credential env a Claude child needs for a custom gateway."""
     env = {
-        "ANTHROPIC_BASE_URL": base_url,
+        "ANTHROPIC_BASE_URL": anthropic_root_base_url(provider.base_url),
         "ANTHROPIC_API_KEY": provider.api_key,
     }
     if provider.headers:
@@ -433,20 +440,25 @@ _PI_API_BY_PROTOCOL = {
 def pi_models_document(providers: tuple[CustomProvider, ...]) -> dict:
     """The ``~/.pi/agent/models.json`` document registering every provider.
 
-    Pi appends the wire path itself (the Anthropic implementation joins
-    ``/v1/messages``, the OpenAI ones ``/chat/completions``/``/responses``),
-    so the registered ``base_url`` follows the same convention the Codex
-    writer relies on: Anthropic gateways without the version segment, OpenAI
-    gateways with it. The key interpolates from the provider's env var, which
-    the supervisor's environment already carries.
+    Pi (via pi-ai) appends the wire path itself — the Anthropic implementation
+    joins ``/v1/messages``, the OpenAI ones ``/chat/completions``/``/responses``
+    — so Anthropic gateways are written at their API root (any registered
+    version segment stripped) and OpenAI gateways keep it. The key interpolates
+    from the provider's env var, which the supervisor's environment already
+    carries.
     """
     document: dict = {"providers": {}}
     for provider in providers:
         api = _PI_API_BY_PROTOCOL.get(provider.protocol)
         if api is None:
             continue
+        base_url = (
+            anthropic_root_base_url(provider.base_url)
+            if provider.is_anthropic_protocol
+            else provider.base_url
+        )
         document["providers"][provider.provider_key] = {
-            "baseUrl": provider.base_url,
+            "baseUrl": base_url,
             "api": api,
             "apiKey": f"${provider.api_key_env}",
             "models": [{"id": model.model_id} for model in provider.models],
@@ -500,7 +512,9 @@ def dsh_profile_patch_entries(providers: tuple[CustomProvider, ...]) -> list[str
     one patch entry carries all of them: endpoint, protocol, the credential
     ref (the provider's env var name, which the credential seam resolves from
     the environment), and the model catalog with the sizes the registry
-    imported.
+    imported. Anthropic gateways are written at their API root — pi-ai's
+    Anthropic client joins ``/v1/messages`` itself — while OpenAI gateways
+    keep the registered version segment.
     """
     if not providers:
         return []
@@ -509,10 +523,15 @@ def dsh_profile_patch_entries(providers: tuple[CustomProvider, ...]) -> list[str
         api = _DSH_API_BY_PROTOCOL.get(provider.protocol)
         if api is None:
             continue
+        base_url = (
+            anthropic_root_base_url(provider.base_url)
+            if provider.is_anthropic_protocol
+            else provider.base_url
+        )
         lines.append(f"      {_yaml_scalar(provider.provider_key)}:")
         lines.append(f"        displayName: {_yaml_scalar(provider.provider_key)}")
         lines.append(f"        api: {api}")
-        lines.append(f"        baseURL: {_yaml_scalar(provider.base_url)}")
+        lines.append(f"        baseURL: {_yaml_scalar(base_url)}")
         lines.append(f"        apiKeyEnv: {_yaml_scalar(provider.api_key_env)}")
         if provider.models:
             lines.append("        models:")
