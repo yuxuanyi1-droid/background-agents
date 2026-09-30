@@ -1,6 +1,7 @@
 """The generic CliHarness: process lifecycle, streaming, timeout, cancellation."""
 
 import asyncio
+import signal
 import sys
 from pathlib import Path
 from typing import Any
@@ -494,4 +495,24 @@ async def test_resident_reverse_request_during_setup_is_answered(tmp_path: Path)
     assert outcome.success
     assert harness.session_id == "s-1"
     assert any(event["type"] == "token" and event["content"] == "Hi" for event in events)
+    await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_resident_start_sweeps_orphaned_servers(tmp_path: Path) -> None:
+    # A bridge crash leaves its resident server alive (own process group), and
+    # the orphan keeps the conversation's locks — the replacement server's
+    # resume is rejected until it dies. Starting a new server sweeps it.
+    import subprocess
+
+    orphan = subprocess.Popen(
+        [sys.executable, "-c", _SERVER_SCRIPT], stdin=subprocess.PIPE
+    )  # stdin held open so the scripted server blocks forever
+    assert orphan.poll() is None
+
+    harness = _harness(_ResidentScriptVendor(_SERVER_SCRIPT), tmp_path)
+    await harness.create_session()
+    outcome, _ = await _run(harness)
+    assert outcome.success
+    assert orphan.wait(timeout=5) == -signal.SIGKILL
     await harness.close()

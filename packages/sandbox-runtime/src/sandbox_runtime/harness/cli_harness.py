@@ -31,6 +31,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from ..custom_providers import find_provider_for_model, load_custom_providers
@@ -45,8 +46,6 @@ from .base import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from ..custom_providers import CustomProvider
     from ..log_config import StructuredLogger
 
@@ -336,6 +335,54 @@ class CliServerDied(Exception):
 _SERVER_EXITED = object()
 
 
+def _resident_server_signature(vendor: ResidentCliVendor) -> list[str]:
+    """The argv prefix every server process of this vendor carries. Called
+    with no session or model so vendors that take spawn-time routing (Pi)
+    return their static form."""
+    return [
+        vendor.binary,
+        *vendor.server_argv(session_id=None, model=None, reasoning_effort=None),
+    ]
+
+
+def kill_orphaned_resident_servers(signature: list[str]) -> list[int]:
+    """SIGKILL resident server processes this harness does not own.
+
+    A resident server is spawned with ``start_new_session`` so a bridge crash
+    or restart does not kill it — which also means nothing ever does. The
+    orphan keeps its vendor's per-conversation locks (Codex holds a
+    single-writer lock per thread), and the replacement server's resume is
+    rejected with "already has an active writer" until the orphan dies. One
+    sandbox runs one session, so any matching process that is not the server
+    this harness is about to start is an orphan.
+    """
+    killed: list[int] = []
+    mine = os.getpid()
+    try:
+        entries = list(os.scandir("/proc"))
+    except OSError:
+        return killed
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid == mine:
+            continue
+        try:
+            argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        args = [part.decode("utf-8", "replace") for part in argv if part]
+        if len(args) < len(signature) or args[: len(signature)] != signature:
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed.append(pid)
+        except OSError:
+            continue
+    return killed
+
+
 class _ResidentServer:
     """A resident vendor protocol server: one process, many turns.
 
@@ -379,6 +426,15 @@ class _ResidentServer:
         reasoning_effort: str | None,
     ) -> None:
         assert self._process is None
+        # A previous server this bridge never reaped may still hold the
+        # conversation's locks; clear it before it can reject our resume.
+        signature = _resident_server_signature(self._vendor)
+        killed = kill_orphaned_resident_servers(signature)
+        if killed:
+            self._log.info(
+                f"{self._vendor.id.value}.server.orphan_sweep",
+                killed_pids=killed,
+            )
         argv = [
             self._vendor.binary,
             *self._vendor.server_argv(
