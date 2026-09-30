@@ -164,6 +164,7 @@ describe("SessionInitHandler", () => {
     expect(repository.upsertSession).toHaveBeenCalledWith({
       id: "session-do-id",
       harness: "opencode",
+      sandboxProvider: null,
       sessionName: "session-public-id",
       title: "Session title",
       repoOwner: "acme",

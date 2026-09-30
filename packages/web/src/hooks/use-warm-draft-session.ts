@@ -12,6 +12,7 @@ import type { InteractiveProviderRoutingIdentity } from "@/lib/provider-selectio
 
 export type WarmDraftSessionRequest = SessionTargetRequestFields & {
   harness: HarnessId;
+  sandboxProvider?: string;
   model: string;
   reasoningEffort?: string;
   skillSelection: SessionSkillSelection;

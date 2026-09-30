@@ -16,7 +16,7 @@ import { createLogger } from "../logger";
 import type { SessionSkillManifestInput } from "./skill-resolution";
 import type { SessionModelProviderAuthInput } from "../model-provider-accounts/provider-auth-contracts";
 import { DEFAULT_BASE_BRANCH } from "../repos/default-branch";
-import { resolveSandboxBackendName } from "../sandbox/provider-name";
+import { resolveSandboxBackendName, type SandboxBackendName } from "../sandbox/provider-name";
 
 const logger = createLogger("session-init");
 
@@ -54,6 +54,8 @@ export interface SessionInitInput {
   title?: string;
   /** Agent harness; validated against model and provider auth by the caller. */
   harness: HarnessId;
+  /** Sandbox backend for this session; validated against configured providers by the caller. */
+  sandboxProvider?: SandboxBackendName;
   model: string;
   reasoningEffort: string | null;
   codeServerEnabled?: boolean;
@@ -173,6 +175,7 @@ export async function initializeSession(
     repoOwner: input.repoOwner,
     repoName: input.repoName,
     harness: input.harness,
+    sandboxProvider: input.sandboxProvider ?? null,
     model: input.model,
     reasoningEffort: input.reasoningEffort,
     baseBranch,
@@ -215,6 +218,7 @@ export async function initializeSession(
           environmentId: input.environmentId ?? null,
           title: input.title,
           harness: input.harness,
+          sandboxProvider: input.sandboxProvider ?? null,
           model: input.model,
           reasoningEffort: input.reasoningEffort,
           userId: input.participantUserId,

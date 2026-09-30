@@ -26,7 +26,7 @@ import { DEFAULT_MODEL, type ReasoningEffort } from "@open-inspect/shared/models
 import { sandboxPromptBlockReason } from "@open-inspect/shared/types/sandbox-shutdown";
 import { generateId, hashToken, encryptToken } from "../auth/crypto";
 import { getUserAuth } from "../auth/user/runtime";
-import { resolveSandboxBackendName } from "../sandbox/provider-name";
+import { resolveSandboxBackendName, type SandboxBackendName } from "../sandbox/provider-name";
 import { createSandboxProviderFromEnv } from "../sandbox/provider-factory";
 import type { SandboxProvider } from "../sandbox/provider";
 import { resolveExecutionBudgetMs } from "../sandbox/execution-budget";
@@ -322,7 +322,8 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     resolveSessionRepoId(sessionRow, sessionCoreRepository, sourceControlProvider);
 
   const sandboxDashboardSettings: SandboxDashboardSettings = {
-    sandboxProvider: env.SANDBOX_PROVIDER,
+    sandboxProvider:
+      sessionCoreRepository.getSession()?.sandbox_provider ?? env.SANDBOX_PROVIDER,
     modalWorkspace: env.MODAL_WORKSPACE,
     modalEnvironment: env.MODAL_ENVIRONMENT,
   };
@@ -425,11 +426,13 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
   const diffsHandler = new SessionDiffsHandler(diffService);
   const eventStream = new SessionEventStream(eventRepository);
 
-  // Tier 5 — the lifecycle manager.
-  const sandboxProvider = createSandboxProviderFromEnv(
-    env,
-    resolveSandboxBackendName(env.SANDBOX_PROVIDER)
+  // Tier 5 — the lifecycle manager. The backend is the session's own choice
+  // — fixed at create — falling back to the deployment default for rows old
+  // enough to predate per-session selection (or before init writes the row).
+  const sandboxBackendName = resolveSandboxBackendName(
+    sessionCoreRepository.getSession()?.sandbox_provider ?? env.SANDBOX_PROVIDER
   );
+  const sandboxProvider = createSandboxProviderFromEnv(env, sandboxBackendName);
   // Tier 6 — the message queue.
   const getExecutionTimeoutMs = () => resolveExecutionTimeoutMs(sessionCoreRepository, env, log);
   const messageFailures = new MessageFailureService(
@@ -461,6 +464,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
   });
   const lifecycleManager = createLifecycleManager({
     provider: sandboxProvider,
+    sandboxBackend: sandboxBackendName,
     shutdown,
     env,
     db,
@@ -1028,6 +1032,8 @@ interface LifecycleManagerDeps {
   wsManager: SessionWebSocketManager;
   alarmScheduler: RehydratableAlarmScheduler;
   sandboxDashboardSettings: SandboxDashboardSettings;
+  /** The session's chosen backend, already validated by construction. */
+  sandboxBackend: SandboxBackendName;
 }
 
 /** Create the lifecycle manager with all required adapters. */
@@ -1045,11 +1051,8 @@ function createLifecycleManager(deps: LifecycleManagerDeps): SandboxLifecycleMan
     wsManager,
     alarmScheduler,
     sandboxDashboardSettings,
+    sandboxBackend,
   } = deps;
-  // Both throw on a misconfigured deployment — deliberately at graph
-  // construction, so every session request fails at initialization instead of
-  // the error surfacing later at the first spawn.
-  const sandboxBackend = resolveSandboxBackendName(env.SANDBOX_PROVIDER);
 
   const lifecycleWsManager = new LifecycleSocketAdapter(wsManager);
 

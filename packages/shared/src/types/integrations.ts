@@ -291,6 +291,18 @@ export const SANDBOX_PROVIDER_NAMES = [
 
 export type SandboxProviderName = (typeof SANDBOX_PROVIDER_NAMES)[number];
 
+/** User-facing labels for provider selection. */
+export const SANDBOX_PROVIDER_LABELS: Record<SandboxProviderName, string> = {
+  modal: "Modal",
+  "modal-vm": "Modal (VM)",
+  daytona: "Daytona",
+  vercel: "Vercel",
+  opencomputer: "OpenComputer",
+  e2b: "E2B",
+};
+
+export const sandboxProviderNameSchema = z.enum(SANDBOX_PROVIDER_NAMES);
+
 const DEFAULT_SANDBOX_SETTING_CAPABILITIES = { resources: true, timeout: true };
 const SANDBOX_SETTING_CAPABILITIES = {
   modal: DEFAULT_SANDBOX_SETTING_CAPABILITIES,

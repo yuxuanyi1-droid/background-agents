@@ -207,6 +207,43 @@ export function createSandboxProviderFromEnv(
   }
 }
 
+/** One selectable sandbox backend in the session form. */
+export interface SandboxProviderOption {
+  readonly name: SandboxBackendName;
+  readonly label: string;
+}
+
+// "modal-vm" is an infra variant of modal, not a distinct user choice.
+const SELECTABLE_SANDBOX_PROVIDERS = ["modal", "daytona", "e2b", "vercel", "opencomputer"] as const;
+
+const SANDBOX_PROVIDER_LABELS: Record<SandboxBackendName, string> = {
+  modal: "Modal",
+  "modal-vm": "Modal (VM)",
+  daytona: "Daytona",
+  e2b: "E2B",
+  vercel: "Vercel",
+  opencomputer: "OpenComputer",
+};
+
+/**
+ * The providers this deployment's credentials can actually construct — the
+ * set the session form offers. Membership is proven by building the provider
+ * the same way the session runtime will, so a listed provider can never fail
+ * at construction time.
+ */
+export function resolveConfiguredSandboxProviders(env: Env): SandboxProviderOption[] {
+  const configured: SandboxProviderOption[] = [];
+  for (const name of SELECTABLE_SANDBOX_PROVIDERS) {
+    try {
+      createSandboxProviderFromEnv(env, name);
+    } catch {
+      continue;
+    }
+    configured.push({ name, label: SANDBOX_PROVIDER_LABELS[name] });
+  }
+  return configured;
+}
+
 /**
  * Configuration a provider needs for the operation at hand, rather than for
  * every operation it supports. A deployment that has switched providers still

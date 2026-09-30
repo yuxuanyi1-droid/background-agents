@@ -5,6 +5,7 @@ import {
 } from "@open-inspect/shared/harnesses";
 import { sessionStatusSchema, spawnSourceSchema } from "@open-inspect/shared/types/sessions";
 import { sessionVisibilitySchema } from "@open-inspect/shared/types/teams";
+import { isSandboxProviderName } from "@open-inspect/shared/types/integrations";
 import { z } from "zod";
 
 /** Persisted D1 session row shared by index and export readers. */
@@ -14,6 +15,7 @@ export const sessionRowSchema = z.object({
   repo_owner: z.string().nullable(),
   repo_name: z.string().nullable(),
   harness: harnessIdSchema.catch(DEFAULT_HARNESS),
+  sandbox_provider: z.string().nullable().catch(null),
   model: z.string(),
   reasoning_effort: z.string().nullable(),
   base_branch: z.string().nullable(),
@@ -59,6 +61,10 @@ export function toSessionFields(row: SessionRow) {
     repoOwner: row.repo_owner,
     repoName: row.repo_name,
     harness: getValidHarnessOrDefault(row.harness),
+    sandboxProvider:
+      row.sandbox_provider && isSandboxProviderName(row.sandbox_provider)
+        ? row.sandbox_provider
+        : null,
     model: row.model,
     reasoningEffort: row.reasoning_effort,
     baseBranch: row.base_branch,

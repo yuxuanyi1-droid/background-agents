@@ -17,6 +17,8 @@ import {
 } from "../routing/identity-enforcement";
 import { resolveEnvironmentTarget, resolveSessionRepositories } from "../repos/resolve";
 import { resolveScmProviderFromEnv } from "../source-control";
+import { resolveConfiguredSandboxProviders } from "../sandbox/provider-factory";
+import { resolveSandboxBackendName, type SandboxBackendName } from "../sandbox/provider-name";
 import { EnvironmentStore } from "../db/environments";
 import { UserStore } from "../db/user-store";
 import { createLogger } from "../logger";
@@ -194,6 +196,20 @@ export async function handleCreateSession(
   const model = getValidModelOrDefault(body.model);
   const harnessModelIncompatibility = checkHarnessCompatibility(harness, model);
   if (harnessModelIncompatibility) return error(harnessModelIncompatibility.message, 400);
+  // The sandbox backend is fixed at create like harness: any configured
+  // provider is accepted, omission means the deployment default.
+  const configuredProviders = resolveConfiguredSandboxProviders(env);
+  const defaultSandboxProvider = resolveSandboxBackendName(env.SANDBOX_PROVIDER);
+  let sandboxProvider: SandboxBackendName = defaultSandboxProvider;
+  if (body.sandboxProvider) {
+    if (!configuredProviders.some((option) => option.name === body.sandboxProvider)) {
+      return error(
+        `Sandbox provider "${body.sandboxProvider}" is not configured on this deployment.`,
+        400
+      );
+    }
+    sandboxProvider = body.sandboxProvider;
+  }
   const reasoningEffort =
     body.reasoningEffort &&
     isValidReasoningEffort(
@@ -263,6 +279,7 @@ export async function handleCreateSession(
     environmentId,
     title: body.title,
     harness,
+    sandboxProvider,
     model,
     reasoningEffort,
     participantUserId,
@@ -293,6 +310,7 @@ export async function handleCreateSession(
   const result: CreateSessionResponse = {
     sessionId,
     status: "created",
+    sandboxProvider,
   };
 
   return json(result, 201);

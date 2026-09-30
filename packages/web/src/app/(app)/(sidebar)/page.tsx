@@ -44,6 +44,9 @@ import {
 } from "@/hooks/use-session-target-picker";
 import { SessionTargetPicker } from "@/components/session-target-picker";
 import { ModelReasoningSelector } from "@/components/model-reasoning-selector";
+import { SandboxProviderSelector } from "@/components/sandbox-provider-selector";
+import { useSandboxProviders, type SandboxProviderOption } from "@/hooks/use-sandbox-providers";
+import { isSandboxProviderName, type SandboxProviderName } from "@open-inspect/shared/types/integrations";
 import { PaperclipIcon, SendIcon } from "@/components/ui/icons";
 import { SessionSkillSelector } from "@/components/session-skill-selector";
 import { PromptSkillTextarea } from "@/components/prompt-skill-autocomplete";
@@ -73,6 +76,7 @@ import {
 
 const LAST_SELECTED_MODEL_STORAGE_KEY = "open-inspect-last-selected-model";
 const LAST_SELECTED_HARNESS_STORAGE_KEY = "open-inspect-last-selected-harness";
+const LAST_SELECTED_SANDBOX_PROVIDER_STORAGE_KEY = "open-inspect-last-selected-sandbox-provider";
 const LAST_SELECTED_REASONING_EFFORT_STORAGE_KEY = "open-inspect-last-selected-reasoning-effort";
 const LEGACY_PROVIDER_SELECTIONS_STORAGE_KEY = "open-inspect-last-provider-selections";
 const LAST_PROVIDER_SELECTIONS_STORAGE_KEY = "open-inspect-last-provider-selections:v1";
@@ -108,6 +112,8 @@ export default function Home() {
   });
   const [modelPreferenceDraft, setModelPreferenceDraft] = useState<ModelPreference | null>(null);
   const [harness, setHarness] = useState<HarnessId>(DEFAULT_HARNESS);
+  const sandboxProviders = useSandboxProviders();
+  const [sandboxProvider, setSandboxProvider] = useState<SandboxProviderName | null>(null);
   const [prompt, setPrompt] = useState("");
   const [skillSelection, setSkillSelection] = useState<SessionSkillSelection>({ mode: "all" });
   const [providerSelections, setProviderSelections] = useState<ModelProviderSelections>({});
@@ -160,6 +166,10 @@ export default function Home() {
       reasoningEffort: storedReasoningEffort ?? undefined,
     });
     setHarness(getValidHarnessOrDefault(localStorage.getItem(LAST_SELECTED_HARNESS_STORAGE_KEY)));
+    const storedSandboxProvider = localStorage.getItem(LAST_SELECTED_SANDBOX_PROVIDER_STORAGE_KEY);
+    if (storedSandboxProvider && isSandboxProviderName(storedSandboxProvider)) {
+      setSandboxProvider(storedSandboxProvider);
+    }
     if (storedProviderSelections) setProviderSelections(storedProviderSelections);
     setProviderSelectionsHydrated(true);
     hasHydratedModelPreferencesRef.current = true;
@@ -229,6 +239,7 @@ export default function Home() {
       ? {
           ...targetRequestFields,
           harness,
+          ...(sandboxProvider ? { sandboxProvider } : {}),
           model: selectedModel,
           reasoningEffort,
           skillSelection,
@@ -277,6 +288,11 @@ export default function Home() {
   const handleHarnessChange = useCallback((nextHarness: HarnessId) => {
     setHarness(nextHarness);
     localStorage.setItem(LAST_SELECTED_HARNESS_STORAGE_KEY, nextHarness);
+  }, []);
+
+  const handleSandboxProviderChange = useCallback((nextProvider: SandboxProviderName) => {
+    setSandboxProvider(nextProvider);
+    localStorage.setItem(LAST_SELECTED_SANDBOX_PROVIDER_STORAGE_KEY, nextProvider);
   }, []);
 
   const handleProviderSelectionChange = useCallback(
@@ -402,6 +418,10 @@ export default function Home() {
       setReasoningEffort={handleReasoningEffortChange}
       harness={harness}
       setHarness={handleHarnessChange}
+      sandboxProviderOptions={sandboxProviders.providers}
+      sandboxProvider={sandboxProvider}
+      defaultSandboxProvider={sandboxProviders.defaultProvider}
+      onSandboxProviderChange={handleSandboxProviderChange}
       prompt={prompt}
       handlePromptChange={handlePromptChange}
       attachments={{
@@ -440,6 +460,10 @@ function HomeContent({
   setReasoningEffort,
   harness,
   setHarness,
+  sandboxProviderOptions,
+  sandboxProvider,
+  defaultSandboxProvider,
+  onSandboxProviderChange,
   prompt,
   handlePromptChange,
   attachments,
@@ -468,6 +492,10 @@ function HomeContent({
   setReasoningEffort: (value: ReasoningEffort | undefined) => void;
   harness: HarnessId;
   setHarness: (value: HarnessId) => void;
+  sandboxProviderOptions: SandboxProviderOption[];
+  sandboxProvider: SandboxProviderName | null;
+  defaultSandboxProvider: SandboxProviderName | undefined;
+  onSandboxProviderChange: (provider: SandboxProviderName) => void;
   prompt: string;
   handlePromptChange: (value: string) => void;
   attachments: {
@@ -648,6 +676,21 @@ function HomeContent({
                       onHarnessChange={setHarness}
                       disabled={creating}
                     />
+
+                    {sandboxProviderOptions.length > 1 && (
+                      <SandboxProviderSelector
+                        options={sandboxProviderOptions}
+                        value={
+                          sandboxProvider &&
+                          sandboxProviderOptions.some((option) => option.name === sandboxProvider)
+                            ? sandboxProvider
+                            : (defaultSandboxProvider ?? sandboxProviderOptions[0]!.name)
+                        }
+                        defaultValue={defaultSandboxProvider ?? sandboxProviderOptions[0]!.name}
+                        onChange={onSandboxProviderChange}
+                        disabled={creating}
+                      />
+                    )}
 
                     <SessionSkillSelector
                       value={skillSelection}

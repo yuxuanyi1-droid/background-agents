@@ -1,4 +1,5 @@
 import { harnessIdSchema } from "../harnesses";
+import { sandboxProviderNameSchema } from "./integrations";
 import { z } from "zod";
 import { sessionSkillSelectionSchema } from "./skills";
 import type { AgentResponse } from "./artifacts";
@@ -232,6 +233,11 @@ const createSessionRequestBaseSchema = z.object({
   title: z.string().optional(),
   /** Agent harness; fixed at create like base_branch. Omission means the built-in harness. */
   harness: harnessIdSchema.optional(),
+  /**
+   * Sandbox backend for this session; fixed at create like harness. Omission
+   * means the deployment's default provider (SANDBOX_PROVIDER).
+   */
+  sandboxProvider: sandboxProviderNameSchema.optional(),
   model: z.string().optional(),
   reasoningEffort: z.string().optional(),
   branch: z.string().optional(),
@@ -309,6 +315,7 @@ export type CreateMediaArtifactRequest = z.infer<typeof createMediaArtifactReque
 export const createSessionResponseSchema = z.object({
   sessionId: z.string().min(1),
   status: sessionStatusSchema,
+  sandboxProvider: sandboxProviderNameSchema.optional(),
 });
 
 export type CreateSessionResponse = z.infer<typeof createSessionResponseSchema>;

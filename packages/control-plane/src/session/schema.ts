@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS session (
   current_sha TEXT,                                 -- Current HEAD SHA
   agent_session_id TEXT,                            -- The agent's own conversation id (1:1 mapping)
   harness TEXT NOT NULL DEFAULT 'opencode',         -- Agent harness id from the shared catalog; fixed at create
+  sandbox_provider TEXT,                          -- Sandbox backend chosen at create; NULL = deployment default
   model TEXT DEFAULT 'anthropic/claude-haiku-4-5',   -- LLM model to use
   reasoning_effort TEXT,                            -- Session-level reasoning effort default
   status TEXT DEFAULT 'created',                    -- 'created', 'active', 'completed', 'failed', 'archived', 'cancelled'
@@ -758,6 +759,13 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
     id: 56,
     description: "Retain rejected sandbox startup cleanup intent",
     run: "ALTER TABLE sandbox ADD COLUMN startup_rejected INTEGER NOT NULL DEFAULT 0",
+  },
+  {
+    id: 57,
+    description: "Add session sandbox_provider for per-session provider selection",
+    run: (sql) => {
+      runMigration(sql, `ALTER TABLE session ADD COLUMN sandbox_provider TEXT`);
+    },
   },
 ];
 

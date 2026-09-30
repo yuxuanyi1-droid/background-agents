@@ -1,4 +1,5 @@
 import { DEFAULT_HARNESS, type HarnessId } from "@open-inspect/shared/harnesses";
+import type { SandboxBackendName } from "../sandbox/provider-name";
 import {
   type PullRequestSummary,
   type SessionReadAction,
@@ -69,6 +70,8 @@ export interface SessionEntry {
   repoName: string | null;
   /** Agent harness; absent on reads of pre-harness rows is impossible (column default). */
   harness?: HarnessId;
+  /** Sandbox backend chosen at create; null means the deployment default. */
+  sandboxProvider?: SandboxBackendName | null;
   model: string;
   reasoningEffort: string | null;
   baseBranch: string | null;
@@ -224,8 +227,8 @@ export class SessionIndexStore {
 
     const sessionStmt = this.db
       .prepare(
-        `INSERT INTO sessions (id, title, repo_owner, repo_name, harness, model, reasoning_effort, base_branch, status, parent_session_id, root_session_id, spawn_source, spawn_depth, automation_id, automation_run_id, scm_login, user_id, environment_id, created_at, updated_at, owner_team_id, visibility)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN ? ELSE (SELECT root_session_id FROM sessions WHERE id = ?) END, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO sessions (id, title, repo_owner, repo_name, harness, sandbox_provider, model, reasoning_effort, base_branch, status, parent_session_id, root_session_id, spawn_source, spawn_depth, automation_id, automation_run_id, scm_login, user_id, environment_id, created_at, updated_at, owner_team_id, visibility)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN ? ELSE (SELECT root_session_id FROM sessions WHERE id = ?) END, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         session.id,
@@ -233,6 +236,7 @@ export class SessionIndexStore {
         repository.repoOwner,
         repository.repoName,
         session.harness ?? DEFAULT_HARNESS,
+        session.sandboxProvider ?? null,
         session.model,
         session.reasoningEffort,
         repository.baseBranch,

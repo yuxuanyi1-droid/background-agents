@@ -53,9 +53,11 @@ describe("applyMigrations", () => {
   it("leaves existing resources workspace-owned without creating teams or memberships", () => {
     // A pre-teams installation: every migration except 0083 (teams) and the
     // later 0084 rebuild, whose staging of 0083's session_collaborators
-    // presumes it. The second run below replays them in filename order.
+    // presumes it — and except 0088, whose sessions column must land after
+    // the 0084 `SELECT *` rebuild, as it did in history. The second run below
+    // replays all three in filename order.
     for (const name of readdirSync(MIGRATIONS_DIR).filter(
-      (file) => file.endsWith(".sql") && !/^(0083|0084)_/.test(file)
+      (file) => file.endsWith(".sql") && !/^(0083|0084|0088)_/.test(file)
     )) {
       copyFileSync(join(MIGRATIONS_DIR, name), join(dir, name));
     }
@@ -83,6 +85,7 @@ describe("applyMigrations", () => {
     expect(applyMigrations(db, MIGRATIONS_DIR)).toEqual([
       "0083_teams.sql",
       "0084_multi_harness_catalog.sql",
+      "0088_session_sandbox_provider.sql",
     ]);
     for (const table of ["sessions", "automations", "environments"]) {
       expect(

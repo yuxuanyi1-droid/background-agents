@@ -46,6 +46,7 @@ export const sessionRowSchema = z.object({
   current_sha: z.string().nullable(),
   agent_session_id: z.string().nullable(), // The agent's own conversation id
   harness: harnessIdSchema, // Agent harness the session runs on; fixed at create
+  sandbox_provider: z.string().nullable().catch(null), // Sandbox backend; NULL = deployment default
   model: z.string(), // LLM model to use (e.g., "anthropic/claude-haiku-4-5")
   reasoning_effort: z.string().nullable(), // Reasoning effort level (e.g., "high", "max")
   status: sessionStatusSchema,

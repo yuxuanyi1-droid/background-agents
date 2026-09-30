@@ -156,6 +156,7 @@ class FakeD1Database {
         repoOwner,
         repoName,
         harness,
+        sandboxProvider,
         model,
         reasoningEffort,
         baseBranch,
@@ -213,6 +214,7 @@ class FakeD1Database {
           repo_owner: repoOwner,
           repo_name: repoName,
           harness,
+          sandbox_provider: sandboxProvider ?? null,
           model,
           reasoning_effort: reasoningEffort,
           base_branch: baseBranch,
@@ -406,6 +408,7 @@ describe("SessionIndexStore", () => {
         ...session,
         // Defaults applied for missing optional fields
         harness: "opencode",
+        sandboxProvider: null,
         parentSessionId: null,
         spawnSource: "user",
         spawnDepth: 0,
