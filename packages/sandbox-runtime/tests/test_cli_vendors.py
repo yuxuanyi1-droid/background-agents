@@ -332,18 +332,41 @@ class TestDsh:
         vendor.parse_record({"type": "session", "sessionId": "d-1", "cwd": "/workspace"}, state)
         assert state.session_id == "d-1"
 
-        events = vendor.parse_record({"type": "text", "delta": "wor"}, state)
+        events = vendor.parse_record({"type": "text", "text": "wor"}, state)
         assert events[-1]["type"] == "token"
+        # Record shapes per dsh-headless's projection (0.1.7-rc.2): the name
+        # rides `tool`, the arguments `input`, and result records carry no
+        # name at all — the learned one must survive the completing event.
         events = vendor.parse_record(
-            {"type": "tool_call", "callId": "c", "name": "bash", "args": {"command": "ls"}}, state
+            {"type": "tool_call", "callId": "c", "tool": "bash", "input": {"command": "ls"}},
+            state,
         )
         assert events[-1]["type"] == "tool_call"
-        events = vendor.parse_record({"type": "tool_result", "callId": "c", "result": "ok"}, state)
+        assert events[-1]["tool"] == "bash"
+        assert events[-1]["args"] == {"command": "ls"}
+        events = vendor.parse_record(
+            {"type": "tool_result", "callId": "c", "status": "completed", "result": "ok"}, state
+        )
+        assert events[-1]["tool"] == "bash"
         assert events[-1]["status"] == "completed"
 
         events = vendor.parse_record({"type": "final", "text": "world"}, state)
         assert events[-1] == {"type": "token", "content": "world", "messageId": "m1"}
         assert state.completed
+
+    def test_tool_result_error_status_is_preserved(self) -> None:
+        vendor = DshVendor()
+        state = _state()
+        vendor.parse_record(
+            {"type": "tool_call", "callId": "c", "tool": "bash", "input": {"command": "ls"}},
+            state,
+        )
+        events = vendor.parse_record(
+            {"type": "tool_result", "callId": "c", "status": "error", "result": "denied"}, state
+        )
+        assert events[-1]["tool"] == "bash"
+        assert events[-1]["status"] == "error"
+        assert events[-1]["output"] == "denied"
 
     def test_error_record(self) -> None:
         events = DshVendor().parse_record({"type": "error", "message": "nope"}, _state())

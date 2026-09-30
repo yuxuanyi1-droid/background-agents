@@ -420,21 +420,25 @@ class DshVendor:
                     events += append_text_events(state, text)
             return events
         if kind == "tool_call":
+            # Record shape per dsh-headless's projection (0.1.7-rc.2): the
+            # tool name rides `tool` and the arguments `input`.
             return tool_events(
                 state,
                 call_id=str(record.get("callId") or record.get("id") or "tool"),
-                name=str(record.get("name") or record.get("tool") or "tool"),
-                args=record.get("args") if isinstance(record.get("args"), dict) else {},
+                name=str(record.get("tool") or record.get("name") or "tool"),
+                args=record.get("input") if isinstance(record.get("input"), dict) else {},
                 status="running",
             )
         if kind == "tool_result":
+            # Result records carry no tool name — tool_events keeps the one the
+            # tool_call record learned — and report errors as status:"error".
             return tool_events(
                 state,
                 call_id=str(record.get("callId") or record.get("id") or "tool"),
-                name=str(record.get("name") or "tool"),
+                name="",
                 args=None,
-                status="error" if record.get("isError") else "completed",
-                output=_as_text(record.get("result") or record.get("output")),
+                status="error" if record.get("status") == "error" else "completed",
+                output=_as_text(record.get("result")),
             )
         if kind == "final":
             text = record.get("text") or record.get("content")
