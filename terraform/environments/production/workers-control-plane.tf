@@ -102,6 +102,7 @@ module "control_plane_worker" {
       SANDBOX_PROVIDER              = { value = var.sandbox_provider }
       SANDBOX_INACTIVITY_TIMEOUT_MS = { value = tostring(var.sandbox_inactivity_timeout_ms) }
       SANDBOX_BOOT_TIMEOUT_MS       = { value = tostring(var.sandbox_boot_timeout_ms) }
+      SANDBOX_AUTO_CONTINUE         = { value = tostring(var.sandbox_auto_continue) }
     },
     local.github_oauth_enabled ? {
       GITHUB_CLIENT_ID = { value = trimspace(var.github_client_id) }

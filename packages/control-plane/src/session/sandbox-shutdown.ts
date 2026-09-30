@@ -34,6 +34,13 @@ const RETIRE_MS = 30_000;
 const MARGIN_MS = 30_000;
 /** How long a sandbox whose save failed is kept for another attempt. */
 const RETRY_WINDOW_MS = 30 * 60_000;
+/**
+ * Most lifetime windows one prompt may be auto-continued through before the
+ * drain falls back to a terminal interruption. Each continuation buys a full
+ * provider TTL window and passes the queue's budget checks, so this bounds an
+ * unattended task's total spend rather than any tight loop.
+ */
+export const MAX_LIFETIME_AUTO_CONTINUATIONS = 12;
 
 /** User-facing text for a prompt interrupted by a shutdown; reasons are internal codes. */
 const INTERRUPTION_MESSAGES: Record<string, string> = {
@@ -48,6 +55,11 @@ const INTERRUPTION_MESSAGES: Record<string, string> = {
 };
 
 class ShutdownDeadlineError extends Error {}
+
+/** Continuations already spent on this message; a different message resets the chain. */
+function lifetimeAutoContinueCount(state: ShutdownRecord | null, messageId: string): number {
+  return state?.autoContinue?.messageId === messageId ? state.autoContinue.count : 0;
+}
 
 interface ShutdownDependencies {
   store: ShutdownStore;
@@ -65,6 +77,12 @@ interface ShutdownDependencies {
   /** Re-derives session status after any interrupted message has been persisted. */
   reconcileStatusFromMessages(): Promise<void>;
   retireAccess(): void;
+  /**
+   * Deployment knob (`SANDBOX_AUTO_CONTINUE`): on a lifetime-expiry drain of
+   * a persistent-resume provider, requeue the interrupted prompt and resume
+   * the paused sandbox automatically instead of holding for the user.
+   */
+  autoContinueOnLifetimeExpiry?: boolean;
   now?: () => number;
   log?: Logger;
 }
@@ -172,6 +190,9 @@ export class SandboxShutdownCoordinator {
         generationReady: false,
         lifecyclePolicy,
         receipt: previous?.receipt,
+        // Chains the auto-continuation count across generations so the cap
+        // survives control-plane restarts.
+        autoContinue: previous?.autoContinue,
         restoreInvoked: restoring ? false : undefined,
       };
       this.deps.store.write(next);
@@ -853,15 +874,31 @@ export class SandboxShutdownCoordinator {
       retireByMs: end - MARGIN_MS,
       continuationPaused: emergency || state?.continuationPaused,
     };
+    let continued = false;
     const failure = this.deps.session.transaction(() => {
       const message = this.deps.messages.getProcessingMessage();
       if (message) {
         next.messageId = message.id;
-        next.continuationPaused = true;
+        if (this.shouldAutoContinue(reason, emergency, message.id, state)) {
+          // The interrupted prompt returns to the queue instead of failing.
+          // With continuationPaused cleared, the committed pause receipt's
+          // saved state reads as "restore_required" → the queue pump spawns
+          // through startupDecision's resume_retained path, and the resumed
+          // sandbox re-dispatches this prompt with a fresh provider TTL.
+          this.deps.messages.updateMessageToPending(message.id);
+          next.continuationPaused = false;
+          next.autoContinue = {
+            messageId: message.id,
+            count: lifetimeAutoContinueCount(state, message.id) + 1,
+          };
+          continued = true;
+        } else {
+          next.continuationPaused = true;
+        }
       }
       this.deps.store.write(next);
       if (emergency) this.deps.sandbox.updateSandboxStatus("stale");
-      return message
+      return message && !continued
         ? this.deps.failures.record(
             message.id,
             INTERRUPTION_MESSAGES[reason] ?? "The sandbox was stopped.",
@@ -871,6 +908,19 @@ export class SandboxShutdownCoordinator {
         : null;
     });
     this.announce(next);
+    if (continued) {
+      this.deps.log?.info("sandbox.auto_continue", {
+        event: "sandbox.auto_continue",
+        message_id: next.messageId,
+        count: next.autoContinue?.count,
+        reason,
+      });
+      this.broadcast({
+        type: "sandbox_warning",
+        message:
+          "The sandbox reached its lifetime limit; it is being resumed and the prompt will continue automatically.",
+      });
+    }
     if (failure) this.deps.failures.deliver(failure);
     this.broadcast({ type: "processing_status", isProcessing: false });
     this.deps.background.submit(() => this.deps.reconcileStatusFromMessages(), {
@@ -884,6 +934,27 @@ export class SandboxShutdownCoordinator {
     }
     await this.advance();
     return "owned";
+  }
+
+  /**
+   * Whether this drain may requeue the interrupted prompt and resume the
+   * paused sandbox automatically: only the graceful lifetime-expiry drain of
+   * a persistent-resume provider (the retained capture — snapshot providers
+   * restore into a fresh sandbox instead), with the deployment knob on and
+   * the per-message continuation cap unspent. Every other interruption keeps
+   * its terminal failure and user-held continuation.
+   */
+  private shouldAutoContinue(
+    reason: string,
+    emergency: boolean,
+    messageId: string,
+    state: ShutdownRecord | null
+  ): boolean {
+    if (emergency || reason !== "sandbox_lifetime_expiring") return false;
+    if (this.deps.autoContinueOnLifetimeExpiry !== true) return false;
+    const capabilities = this.deps.provider.capabilities;
+    if (!capabilities.supportsPersistentResume || capabilities.supportsSnapshots) return false;
+    return lifetimeAutoContinueCount(state, messageId) < MAX_LIFETIME_AUTO_CONTINUATIONS;
   }
 
   prepared(event: Extract<SandboxEvent, { type: "preservation_prepared" }>): void {

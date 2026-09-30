@@ -25,6 +25,7 @@ e2b_template_id = "open-inspect-sandbox" # template name to build/use
 # e2b_api_url                 = "https://api.e2b.app" # REST API base URL
 # e2b_sandbox_timeout_seconds = 7200                  # sandbox TTL (default 2h)
 # e2b_auto_pause              = true                   # pause (recoverable), not kill, on TTL lapse
+# sandbox_auto_continue       = false                  # auto-resume + re-dispatch across the TTL boundary
 # e2b_template_cpu            = 2                      # template vCPU count
 # e2b_template_memory_mb      = 4096                   # template memory (MB, even number)
 ```
@@ -38,6 +39,7 @@ E2B_TEMPLATE_ID
 E2B_API_URL                 # optional
 E2B_SANDBOX_TIMEOUT_SECONDS # optional
 E2B_AUTO_PAUSE              # optional
+SANDBOX_AUTO_CONTINUE       # optional ("true" to enable)
 E2B_TEMPLATE_CPU            # optional
 E2B_TEMPLATE_MEMORY_MB      # optional
 ```
@@ -46,7 +48,8 @@ The E2B provider also needs the normal Open-Inspect values such as Cloudflare, G
 Anthropic, and web app configuration. See [GETTING_STARTED.md](./GETTING_STARTED.md) for the full
 deployment flow.
 
-> On the **Hobby** tier (~1h runtime cap), lower `e2b_sandbox_timeout_seconds` to `3300`.
+> On the **Hobby** tier (~1h runtime cap), lower `e2b_sandbox_timeout_seconds` to `3300` and set
+> `sandbox_auto_continue = true` so running prompts continue automatically across the hourly pause.
 
 ## Template Build
 
@@ -126,6 +129,19 @@ therefore drives the lifecycle through the shared lifecycle manager, treating E2
 - Only sandboxes that fail before becoming usable — a spawn that never connects, or one whose
   entrypoint could not be started — are **killed**, to avoid orphaning them.
 
+### Automatic continuation across the TTL boundary
+
+By default, a prompt that is still running when the graceful lifetime drain begins fails with "The
+sandbox reached its maximum lifetime." and the paused session waits for the user to continue it.
+Setting `sandbox_auto_continue = true` (the `SANDBOX_AUTO_CONTINUE` deployment knob) changes that
+drain: the interrupted prompt is put back in the queue, the paused sandbox is resumed automatically,
+and the prompt is re-dispatched into a fresh TTL window — a long task rides out the TTL boundary
+unattended. The requeue is capped per prompt (12 lifetime windows) so an unattended task still
+terminates; past the cap (or with the knob off) the drain keeps its terminal failure and user hold.
+Auto-continuation applies only to the graceful lifetime drain — inactivity timeouts, emergency
+stops, and runtime failures still interrupt the prompt — and only to pause-preserving providers
+(E2B, Daytona); snapshot providers such as Modal restore into a fresh sandbox instead.
+
 Paused E2B sandboxes are not billed and are retained indefinitely, so pausing is the default
 recoverable stop. `E2B_AUTO_PAUSE` controls the **TTL action** (pause vs kill when the timeout
 lapses); the ~10-minute inactivity pause above is driven by the shared lifecycle manager and applies
@@ -192,7 +208,8 @@ hash of the template and runtime source. To force a rebuild, change a hashed sou
 ### Sandbox Times Out Too Soon
 
 On plans with a short maximum lifetime, lower `e2b_sandbox_timeout_seconds`. With `E2B_AUTO_PAUSE`
-enabled the sandbox pauses (recoverable) at the TTL rather than being lost.
+enabled the sandbox pauses (recoverable) at the TTL rather than being lost. To keep a long-running
+prompt going across those TTL pauses without a manual continue, set `sandbox_auto_continue = true`.
 
 ### Missing Repository Access
 

@@ -710,6 +710,12 @@ variable "sandbox_boot_timeout_ms" {
   }
 }
 
+variable "sandbox_auto_continue" {
+  description = "On a lifetime-expiry drain of a persistent-resume sandbox (E2B, Daytona), requeue the interrupted prompt, resume the paused sandbox, and re-dispatch it automatically instead of holding the session for the user. Useful on plans with short sandbox lifetime caps (e.g. E2B Hobby)."
+  type        = bool
+  default     = false
+}
+
 variable "web_platform" {
   description = "Platform for the web app deployment: 'vercel' or 'cloudflare' (OpenNext)"
   type        = string

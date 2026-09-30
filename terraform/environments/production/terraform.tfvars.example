@@ -119,6 +119,11 @@ e2b_template_id = ""           # e.g., "open-inspect-sandbox"
 # Auto-pause makes a lapsed TTL recoverable (pause, not kill) and auto-resumes the
 # sandbox on inbound activity. Default true; set false to kill on timeout.
 # e2b_auto_pause = true
+# On a lifetime-expiry drain, automatically resume the paused sandbox and
+# re-dispatch the interrupted prompt instead of holding the session for the
+# user — long tasks ride out the TTL boundary unattended (E2B Hobby: pair with
+# e2b_sandbox_timeout_seconds = 3300). Default false.
+# sandbox_auto_continue = true
 
 # =============================================================================
 # GitHub App Credentials

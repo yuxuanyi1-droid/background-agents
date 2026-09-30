@@ -32,6 +32,14 @@ const stateSchema = sandboxShutdownSchema
     discarding: z.string().optional(),
     operationId: z.string().optional(),
     messageId: z.string().optional(),
+    /**
+     * Consecutive lifetime-expiry auto-continuations of `messageId`. Chained
+     * through `reserveStartup` so the cap survives control-plane restarts;
+     * a different interrupted message starts a fresh count.
+     */
+    autoContinue: z
+      .object({ messageId: z.string(), count: z.number().int().nonnegative() })
+      .optional(),
     stopByMs: z.number().optional(),
     captureByMs: z.number().optional(),
     retireByMs: z.number().optional(),

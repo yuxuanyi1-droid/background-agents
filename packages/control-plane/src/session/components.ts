@@ -457,6 +457,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     onLifecycleChange: () => messageQueue.processMessageQueue(),
     reconcileStatusFromMessages: () => statusService.reconcileFromMessageState(),
     retireAccess: () => lifecycleManager.retireShutdownAccess(),
+    autoContinueOnLifetimeExpiry: env.SANDBOX_AUTO_CONTINUE === "true",
   });
   const lifecycleManager = createLifecycleManager({
     provider: sandboxProvider,

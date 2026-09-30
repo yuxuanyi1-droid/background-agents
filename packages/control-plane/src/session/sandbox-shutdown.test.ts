@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SandboxEvent } from "@open-inspect/shared/types/sandbox-events";
 import type { SandboxProvider } from "../sandbox/provider";
-import { SandboxShutdownCoordinator } from "./sandbox-shutdown";
+import { MAX_LIFETIME_AUTO_CONTINUATIONS, SandboxShutdownCoordinator } from "./sandbox-shutdown";
 import type { ShutdownRecord, ShutdownStore } from "./sandbox-shutdown-repository";
 
 const GENERATION = { sandboxId: "sandbox-1", createdAt: 1_000 };
@@ -29,6 +29,22 @@ function provider(overrides: Partial<SandboxProvider> = {}): SandboxProvider {
     },
     ...overrides,
   } as SandboxProvider;
+}
+
+/** An E2B-shaped backend: pause-preserving, no snapshot/restore. */
+function retainedProvider(overrides: Partial<SandboxProvider> = {}): SandboxProvider {
+  return provider({
+    name: "e2b",
+    capabilities: {
+      supportsSandboxTimeout: true,
+      supportsSnapshots: false,
+      supportsRestore: false,
+      supportsPersistentResume: true,
+      supportsExplicitStop: true,
+    },
+    stopSandbox: vi.fn(async () => ({ success: true })),
+    ...overrides,
+  });
 }
 
 function fixture(providerValue = provider()) {
@@ -72,6 +88,7 @@ function fixture(providerValue = provider()) {
     },
     messages: {
       getProcessingMessage: vi.fn<() => { id: string } | null>(() => null),
+      updateMessageToPending: vi.fn(),
     },
     failures: { record: vi.fn(), deliver: vi.fn() },
     messenger: {
@@ -92,6 +109,7 @@ function fixture(providerValue = provider()) {
     onLifecycleChange: vi.fn(async () => undefined),
     reconcileStatusFromMessages: vi.fn(async () => undefined),
     retireAccess: vi.fn(() => calls.push("access-retired")),
+    autoContinueOnLifetimeExpiry: false,
     now: () => now,
   };
   const shutdown = new SandboxShutdownCoordinator(deps as never);
@@ -701,6 +719,168 @@ describe("SandboxShutdownCoordinator", () => {
     expect(f.deps.failures.deliver).toHaveBeenCalledOnce();
     expect(f.store.value?.messageId).toBe("message-1");
     expect(f.deps.reconcileStatusFromMessages).toHaveBeenCalledOnce();
+  });
+
+  it("auto-continues a lifetime drain by requeueing the prompt instead of failing it", async () => {
+    const f = fixture(retainedProvider());
+    f.deps.autoContinueOnLifetimeExpiry = true;
+    f.deps.messages.getProcessingMessage.mockReturnValue({ id: "message-1" });
+    await readyFinite(f);
+
+    await expect(f.shutdown.requestShutdown("sandbox_lifetime_expiring")).resolves.toBe("owned");
+
+    expect(f.deps.messages.updateMessageToPending).toHaveBeenCalledWith("message-1");
+    expect(f.deps.failures.record).not.toHaveBeenCalled();
+    expect(f.store.value).toMatchObject({
+      messageId: "message-1",
+      continuationPaused: false,
+      autoContinue: { messageId: "message-1", count: 1 },
+    });
+    expect(f.deps.messenger.broadcast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "sandbox_warning",
+        message: expect.stringContaining("continue automatically"),
+      })
+    );
+
+    // The committed pause receipt must read as resumable, not user-held, so the
+    // queue pump spawns through the resume path on its own.
+    f.shutdown.prepared(preparedEvent(f.store.value!));
+    await f.shutdown.handleAlarm();
+    expect(f.store.value).toMatchObject({
+      phase: "saved",
+      continuationPaused: false,
+      receipt: { kind: "retained", artifactId: "provider-object-1" },
+    });
+    expect(f.shutdown.admissionDecision()).toBe("restore_required");
+    expect(f.shutdown.startupDecision()).toMatchObject({
+      kind: "resume_retained",
+      providerObjectId: "provider-object-1",
+    });
+  });
+
+  it("increments the chain when the resumed sandbox hits its next lifetime window", async () => {
+    const f = fixture(retainedProvider());
+    f.deps.autoContinueOnLifetimeExpiry = true;
+    f.deps.messages.getProcessingMessage.mockReturnValue({ id: "message-1" });
+    await readyFinite(f);
+    await f.shutdown.requestShutdown("sandbox_lifetime_expiring");
+    f.shutdown.prepared(preparedEvent(f.store.value!));
+    await f.shutdown.handleAlarm();
+
+    // The automatic resume runs as a new generation with a fresh provider TTL.
+    const replacement = { sandboxId: "sandbox-2", createdAt: 2_000 };
+    reserveGeneration(f, replacement, "confirmed");
+    f.sandboxRow.modal_object_id = "provider-object-2";
+    f.shutdown.markRecoveryInvoked(replacement, "provider-object-2");
+    await f.shutdown.recordProviderStartup(replacement, {
+      kind: "finite",
+      expiresAtMs: 2_500_000,
+      observedAtMs: 200_000,
+      source: "provider",
+    });
+    f.shutdown.runtimeReady(1);
+    f.shutdown.generationReady({
+      type: "sandbox_generation_ready",
+      generation: replacement,
+      sandboxId: replacement.sandboxId,
+      timestamp: 2,
+    });
+    expect(f.store.value?.autoContinue).toMatchObject({ messageId: "message-1", count: 1 });
+
+    f.setNow(f.store.value!.drainAtMs!);
+    await f.shutdown.handleAlarm();
+
+    expect(f.deps.messages.updateMessageToPending).toHaveBeenCalledTimes(2);
+    expect(f.store.value).toMatchObject({
+      autoContinue: { messageId: "message-1", count: 2 },
+      continuationPaused: false,
+    });
+  });
+
+  it("starts a fresh chain when a different prompt is interrupted", async () => {
+    const f = fixture(retainedProvider());
+    f.deps.autoContinueOnLifetimeExpiry = true;
+    f.deps.messages.getProcessingMessage.mockReturnValue({ id: "message-2" });
+    await readyFinite(f);
+    f.store.write({
+      ...f.store.value!,
+      autoContinue: { messageId: "message-1", count: MAX_LIFETIME_AUTO_CONTINUATIONS },
+    });
+
+    await f.shutdown.requestShutdown("sandbox_lifetime_expiring");
+
+    expect(f.store.value).toMatchObject({ autoContinue: { messageId: "message-2", count: 1 } });
+    expect(f.deps.messages.updateMessageToPending).toHaveBeenCalledWith("message-2");
+  });
+
+  it("stops auto-continuing at the per-message cap and interrupts terminally", async () => {
+    const f = fixture(retainedProvider());
+    f.deps.autoContinueOnLifetimeExpiry = true;
+    f.deps.messages.getProcessingMessage.mockReturnValue({ id: "message-1" });
+    await readyFinite(f);
+    f.store.write({
+      ...f.store.value!,
+      autoContinue: { messageId: "message-1", count: MAX_LIFETIME_AUTO_CONTINUATIONS },
+    });
+
+    await f.shutdown.requestShutdown("sandbox_lifetime_expiring");
+
+    expect(f.deps.messages.updateMessageToPending).not.toHaveBeenCalled();
+    expect(f.deps.failures.record).toHaveBeenCalledWith(
+      "message-1",
+      "The sandbox reached its maximum lifetime.",
+      100_000,
+      "processing"
+    );
+    expect(f.store.value?.continuationPaused).toBe(true);
+  });
+
+  it.each([
+    {
+      what: "the deployment knob is off",
+      providerValue: retainedProvider(),
+      configure: (_f: ReturnType<typeof fixture>) => {},
+      drain: (f: ReturnType<typeof fixture>) =>
+        f.shutdown.requestShutdown("sandbox_lifetime_expiring"),
+    },
+    {
+      what: "the provider restores from snapshots rather than pausing",
+      providerValue: provider(),
+      configure: (f: ReturnType<typeof fixture>) => {
+        f.deps.autoContinueOnLifetimeExpiry = true;
+      },
+      drain: (f: ReturnType<typeof fixture>) =>
+        f.shutdown.requestShutdown("sandbox_lifetime_expiring"),
+    },
+    {
+      what: "the drain reason is not the sandbox lifetime",
+      providerValue: retainedProvider(),
+      configure: (f: ReturnType<typeof fixture>) => {
+        f.deps.autoContinueOnLifetimeExpiry = true;
+      },
+      drain: (f: ReturnType<typeof fixture>) => f.shutdown.requestShutdown("inactivity_timeout"),
+    },
+    {
+      what: "the drain is an emergency stop",
+      providerValue: retainedProvider(),
+      configure: (f: ReturnType<typeof fixture>) => {
+        f.deps.autoContinueOnLifetimeExpiry = true;
+      },
+      drain: (f: ReturnType<typeof fixture>) =>
+        f.shutdown.requestShutdown("sandbox_lifetime_expiring", "emergency"),
+    },
+  ])("keeps the terminal interruption when $what", async ({ providerValue, configure, drain }) => {
+    const f = fixture(providerValue);
+    configure(f);
+    f.deps.messages.getProcessingMessage.mockReturnValue({ id: "message-1" });
+    await readyFinite(f);
+
+    await drain(f);
+
+    expect(f.deps.messages.updateMessageToPending).not.toHaveBeenCalled();
+    expect(f.deps.failures.record).toHaveBeenCalledOnce();
+    expect(f.store.value?.continuationPaused).toBe(true);
   });
 
   it("ignores duplicate prepared evidence after the durable phase transition", async () => {
