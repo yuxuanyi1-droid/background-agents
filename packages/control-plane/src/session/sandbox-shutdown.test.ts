@@ -181,9 +181,9 @@ function preparedEvent(
   return {
     type: "preservation_prepared",
     operationId: state.operationId!,
-    generation: GENERATION,
+    generation: state.generation,
     executionStopped: true,
-    sandboxId: GENERATION.sandboxId,
+    sandboxId: state.generation.sandboxId,
     timestamp: 1,
   };
 }
@@ -721,6 +721,40 @@ describe("SandboxShutdownCoordinator", () => {
     expect(f.deps.reconcileStatusFromMessages).toHaveBeenCalledOnce();
   });
 
+  it("records a runtime-window refresh by extending the expiry and re-arming the alarm", async () => {
+    const f = fixture(retainedProvider());
+    await readyFinite(f, 1_300_000);
+
+    await f.shutdown.recordRuntimeWindowRefresh({
+      kind: "finite",
+      expiresAtMs: 4_000_000,
+      observedAtMs: 200_000,
+      source: "provider",
+    });
+
+    expect(f.store.value).toMatchObject({
+      phase: "running",
+      expiresAtMs: 4_000_000,
+      drainAtMs: 3_400_000,
+    });
+  });
+
+  it("records the provider's fresh endAt verbatim when a refresh did not extend it", async () => {
+    const f = fixture(retainedProvider());
+    await readyFinite(f, 1_300_000);
+
+    await f.shutdown.recordRuntimeWindowRefresh({
+      kind: "finite",
+      expiresAtMs: 1_100_000,
+      observedAtMs: 200_000,
+      source: "provider",
+    });
+
+    // The provider's own deadline is the truth a refresh reports; a read that
+    // did not extend simply pulls the drain conservatively earlier.
+    expect(f.store.value).toMatchObject({ expiresAtMs: 1_100_000, drainAtMs: 500_000 });
+  });
+
   it("auto-continues a lifetime drain by requeueing the prompt instead of failing it", async () => {
     const f = fixture(retainedProvider());
     f.deps.autoContinueOnLifetimeExpiry = true;
@@ -729,14 +763,16 @@ describe("SandboxShutdownCoordinator", () => {
 
     await expect(f.shutdown.requestShutdown("sandbox_lifetime_expiring")).resolves.toBe("owned");
 
-    expect(f.deps.messages.updateMessageToPending).toHaveBeenCalledWith("message-1");
+    // The requeue and its user-facing promise wait for the confirmed pause:
+    // nothing is promised while the drain can still fail.
+    expect(f.deps.messages.updateMessageToPending).not.toHaveBeenCalled();
     expect(f.deps.failures.record).not.toHaveBeenCalled();
     expect(f.store.value).toMatchObject({
       messageId: "message-1",
       continuationPaused: false,
       autoContinue: { messageId: "message-1", count: 1 },
     });
-    expect(f.deps.messenger.broadcast).toHaveBeenCalledWith(
+    expect(f.deps.messenger.broadcast).not.toHaveBeenCalledWith(
       expect.objectContaining({
         type: "sandbox_warning",
         message: expect.stringContaining("continue automatically"),
@@ -747,6 +783,13 @@ describe("SandboxShutdownCoordinator", () => {
     // queue pump spawns through the resume path on its own.
     f.shutdown.prepared(preparedEvent(f.store.value!));
     await f.shutdown.handleAlarm();
+    expect(f.deps.messages.updateMessageToPending).toHaveBeenCalledWith("message-1");
+    expect(f.deps.messenger.broadcast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "sandbox_warning",
+        message: expect.stringContaining("continue automatically"),
+      })
+    );
     expect(f.store.value).toMatchObject({
       phase: "saved",
       continuationPaused: false,
@@ -790,6 +833,9 @@ describe("SandboxShutdownCoordinator", () => {
 
     f.setNow(f.store.value!.drainAtMs!);
     await f.shutdown.handleAlarm();
+    // The second drain's requeue also lands once its capture confirms.
+    f.shutdown.prepared(preparedEvent(f.store.value!));
+    await f.shutdown.handleAlarm();
 
     expect(f.deps.messages.updateMessageToPending).toHaveBeenCalledTimes(2);
     expect(f.store.value).toMatchObject({
@@ -810,7 +856,11 @@ describe("SandboxShutdownCoordinator", () => {
 
     await f.shutdown.requestShutdown("sandbox_lifetime_expiring");
 
+    // Fresh chain, same deferral: the requeue lands once the pause confirms.
     expect(f.store.value).toMatchObject({ autoContinue: { messageId: "message-2", count: 1 } });
+    expect(f.deps.messages.updateMessageToPending).not.toHaveBeenCalled();
+    f.shutdown.prepared(preparedEvent(f.store.value!));
+    await f.shutdown.handleAlarm();
     expect(f.deps.messages.updateMessageToPending).toHaveBeenCalledWith("message-2");
   });
 

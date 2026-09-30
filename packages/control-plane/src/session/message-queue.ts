@@ -524,6 +524,20 @@ export class SessionMessageQueue {
     }
 
     const sandboxWs = target.socket;
+    // L0: between turns (no processing message, sandbox ready and attached),
+    // reset a provider-managed continuous-run window that is running old —
+    // E2B Hobby's 1h cap never interrupts a session whose turns each fit the
+    // window. The refresh pause drops this very socket, so dispatch defers to
+    // the pump the runtime's ready event fires after the bridge reconnects.
+    if (await this.sandboxLifecycle.refreshRuntimeWindowIfStale()) {
+      this.log.info("prompt.dispatch", {
+        event: "prompt.dispatch",
+        message_id: message.id,
+        outcome: "deferred",
+        reason: "runtime_window_refresh",
+      });
+      return;
+    }
     const author = this.participantRepository.getParticipantById(message.author_id);
     if (!author) {
       throw new Error(`Missing prompt author ${message.author_id}`);

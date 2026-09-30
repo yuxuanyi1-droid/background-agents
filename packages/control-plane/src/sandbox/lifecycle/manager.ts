@@ -95,6 +95,14 @@ const log = createLogger("lifecycle-manager");
 
 /** TTL for terminal auth JWTs (24 hours, matching typical sandbox lifetime). */
 const TERMINAL_TOKEN_TTL_SECONDS = 86400;
+// Refresh the continuous-run window once this little of it remains. With the
+// E2B Hobby cap (a 55-minute configured window) this refreshes from the
+// 35-minute mark of each window; providers without the capability never pay
+// a pause.
+const RUNTIME_WINDOW_REFRESH_THRESHOLD_MS = 20 * 60_000;
+// Floor between refresh attempts: a connect that failed to extend the TTL
+// must not turn every dispatch into a pause→connect cycle.
+const RUNTIME_WINDOW_REFRESH_COOLDOWN_MS = 5 * 60_000;
 const PROVIDER_REPLACEMENT_STOP_TIMEOUT_MS = 10_000;
 const REJECTED_ALLOCATION_CLEANUP_RETRY_MS = 30_000;
 
@@ -118,6 +126,8 @@ export interface SandboxShutdownLifecycle {
   ): Promise<"registered" | "expired" | "superseded">;
   /** Records the provider-confirmed handle and scheduling lifetime after startup. */
   recordProviderStartup(generation: SandboxGeneration, lifetime: SandboxLifetime): Promise<void>;
+  /** Re-record provider expiry after an in-place runtime-window refresh (E2B pause→connect). */
+  recordRuntimeWindowRefresh(lifetime: SandboxLifetime): Promise<void>;
   /** Blocks generic destructive lifecycle work while shutdown or capture ownership is unresolved. */
   isHolding(): boolean;
   /** Tells a runtime refused at reconnect to retry while a capture needs its sandbox. */
@@ -457,6 +467,9 @@ export interface SlackAgentNotifyLookup {
  */
 export interface SandboxLifecycle {
   spawnSandbox(): Promise<void>;
+
+  /** L0: refresh a stale continuous-run window before dispatch; true = deferred. */
+  refreshRuntimeWindowIfStale(): Promise<boolean>;
   updateLastActivity(timestamp: number): void;
   onPromptDispatched(): void;
   terminateUnresponsiveSandbox(trigger: UnresponsiveSandboxTrigger): Promise<void>;
@@ -515,6 +528,8 @@ export class SandboxLifecycleManager
   private isSpawningSandbox = false;
   private isTerminatingSandbox = false;
   private providerStartupPending = false;
+  private runtimeWindowRefreshInFlight = false;
+  private lastRuntimeWindowRefreshAtMs = 0;
   retireShutdownAccess(): void {
     this.clearSandboxAccessState();
     this.wsManager.detachSandboxWebSocket(1000, "Sandbox state preserved");
@@ -2178,6 +2193,59 @@ export class SandboxLifecycleManager
 
   onShutdownPrepared(event: Extract<SandboxEvent, { type: "preservation_prepared" }>): void {
     this.shutdown.prepared(event);
+  }
+
+  /**
+   * L0 runtime-window refresh: reset a provider-managed continuous-run
+   * window (E2B Hobby's 1h cap) BETWEEN turns, before a prompt is
+   * dispatched. A memory pause→connect re-arms the provider TTL while every
+   * process continues where it froze, so long sessions never hit the cap as
+   * long as each turn fits the window. Called only with the sandbox ready,
+   * idle (no processing message), and the dispatch socket attached; the
+   * pause drops that socket, so the caller must NOT dispatch this tick —
+   * the runtime's ready event pumps the queue again once the bridge
+   * reconnects. Returns true when a refresh ran. Failures log and return
+   * false: the ordinary lifetime drain remains the safety net.
+   */
+  async refreshRuntimeWindowIfStale(): Promise<boolean> {
+    const refresh = this.provider.refreshRuntimeWindow;
+    if (!refresh || !this.provider.capabilities.supportsRuntimeWindowRefresh) return false;
+    const snapshot = this.shutdownSnapshot();
+    const expiresAtMs = snapshot?.expiresAtMs ?? null;
+    if (expiresAtMs == null || snapshot?.phase !== "running") return false;
+    const remainingMs = expiresAtMs - Date.now();
+    if (remainingMs > RUNTIME_WINDOW_REFRESH_THRESHOLD_MS) return false;
+    const row = this.storage.getSandboxWithCircuitBreaker();
+    const providerObjectId = row?.modal_object_id ?? null;
+    if (!providerObjectId || row?.status !== "ready") return false;
+    if (this.runtimeWindowRefreshInFlight) return false;
+    if (Date.now() - this.lastRuntimeWindowRefreshAtMs < RUNTIME_WINDOW_REFRESH_COOLDOWN_MS) {
+      return false;
+    }
+    this.runtimeWindowRefreshInFlight = true;
+    try {
+      const lifetime = await refresh.call(this.provider, providerObjectId);
+      await this.shutdown.recordRuntimeWindowRefresh(lifetime);
+      this.lastRuntimeWindowRefreshAtMs = Date.now();
+      this.log.info("sandbox.runtime_window_refreshed", {
+        event: "sandbox.runtime_window_refreshed",
+        provider_object_id: providerObjectId,
+        remaining_ms_before: remainingMs,
+        expires_at_ms: lifetime.kind === "finite" ? lifetime.expiresAtMs : null,
+      });
+      return true;
+    } catch (error) {
+      this.log.warn("sandbox.runtime_window_refresh_failed", {
+        event: "sandbox.runtime_window_refresh_failed",
+        provider_object_id: providerObjectId,
+        remaining_ms: remainingMs,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      this.lastRuntimeWindowRefreshAtMs = Date.now();
+      return false;
+    } finally {
+      this.runtimeWindowRefreshInFlight = false;
+    }
   }
 
   mayProcessQueuedWork(): boolean {

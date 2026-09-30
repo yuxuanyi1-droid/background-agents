@@ -62,6 +62,7 @@ import {
   type SandboxProviderCapabilities,
   type SnapshotConfig,
   type SnapshotResult,
+  type SandboxLifetime,
   type StopConfig,
   type StopResult,
 } from "../provider";
@@ -166,7 +167,7 @@ export interface E2BProviderConfig {
   autoPause: boolean;
 }
 
-type E2BOperation = "create" | "resume" | "stop" | "snapshot" | "delete";
+type E2BOperation = "create" | "resume" | "refresh" | "stop" | "snapshot" | "delete";
 
 export class E2BSandboxProvider implements SandboxProvider {
   readonly name = "e2b";
@@ -197,6 +198,9 @@ export class E2BSandboxProvider implements SandboxProvider {
     // Stop is a resumable pause; the manager treats it as provider-managed state.
     supportsPersistentResume: true,
     supportsExplicitStop: true,
+    // A memory pause freezes the whole sandbox (bridge, vendor, turn state),
+    // so pause→connect resets the continuous-run window without losing work.
+    supportsRuntimeWindowRefresh: true,
   };
 
   constructor(
@@ -452,6 +456,57 @@ export class E2BSandboxProvider implements SandboxProvider {
   }
 
   /**
+   * Reset the continuous-run window of a live sandbox: a memory pause
+   * followed by connect re-arms the provider TTL while every process —
+   * bridge, resident vendor, in-flight conversation state — continues where
+   * it froze. E2B intermittently answers these with ServiceBusy/503, so each
+   * leg gets one delayed retry; any other failure surfaces to the caller,
+   * which simply keeps the existing lifetime drain as the safety net.
+   */
+  async refreshRuntimeWindow(
+    providerObjectId: string,
+    timeoutSeconds?: number
+  ): Promise<SandboxLifetime> {
+    try {
+      const seconds = timeoutSeconds ?? this.providerConfig.sandboxTimeoutSeconds;
+      await this.withRefreshRetry(providerObjectId, "pause", () =>
+        this.client.pauseSandbox(providerObjectId)
+      );
+      await this.withRefreshRetry(providerObjectId, "connect", () =>
+        this.client.connectSandbox(providerObjectId, seconds)
+      );
+      return await this.readLifetime(providerObjectId, "refresh");
+    } catch (error) {
+      throw this.classifyError("Failed to refresh E2B runtime window", error, "refresh");
+    }
+  }
+
+  private async withRefreshRetry(
+    providerObjectId: string,
+    name: "pause" | "connect",
+    leg: () => Promise<unknown>
+  ): Promise<void> {
+    const delayMs = 1_000;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await leg();
+        return;
+      } catch (error) {
+        const transient =
+          error instanceof E2BApiError && (error.status === 503 || error.status === 429);
+        if (!transient || attempt >= 2) throw error;
+        log.warn("e2b.runtime_window_refresh_retry", {
+          sandbox_id: providerObjectId,
+          leg: name,
+          attempt,
+          delay_ms: delayMs,
+        });
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+
+  /**
    * Idle/heartbeat stops are a resumable PAUSE (the manager routes them here via
    * supportsPersistentResume, and resumeSandbox brings the sandbox back).
    * Terminal stops (a sandbox that never connected) instead KILL: the manager
@@ -527,7 +582,10 @@ export class E2BSandboxProvider implements SandboxProvider {
       : ({ kind: "unknown", observedAtMs, reason: "E2B detail omitted a valid endAt" } as const);
   }
 
-  private async readLifetime(providerObjectId: string, operation: "create" | "resume") {
+  private async readLifetime(
+    providerObjectId: string,
+    operation: "create" | "resume" | "refresh"
+  ) {
     try {
       return this.lifetimeFromDetail(await this.client.getSandbox(providerObjectId));
     } catch (error) {

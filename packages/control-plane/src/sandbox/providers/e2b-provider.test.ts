@@ -787,3 +787,70 @@ describe("E2BSandboxProvider prebuilt images / snapshots", () => {
     expect(client.startProcess).not.toHaveBeenCalled();
   });
 });
+
+describe("refreshRuntimeWindow", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("pauses with memory, connects, and reads the fresh lifetime", async () => {
+    const client = mockClient({
+      getSandbox: vi.fn(async () => ({
+        sandboxID: "e2b-id",
+        templateID: "tmpl",
+        state: "running",
+        endAt: "2030-01-02T03:04:05.000Z",
+      })),
+    });
+    const provider = new E2BSandboxProvider(client, providerConfig);
+
+    const lifetime = await provider.refreshRuntimeWindow!("e2b-id");
+
+    expect(client.pauseSandbox).toHaveBeenCalledWith("e2b-id");
+    expect(client.connectSandbox).toHaveBeenCalledWith(
+      "e2b-id",
+      providerConfig.sandboxTimeoutSeconds
+    );
+    expect(lifetime).toEqual({
+      kind: "finite",
+      expiresAtMs: Date.parse("2030-01-02T03:04:05.000Z"),
+      observedAtMs: expect.any(Number),
+      source: "provider",
+    });
+  });
+
+  it("retries one transient service-busy pause before giving up cleanly", async () => {
+    const client = mockClient({
+      getSandbox: vi.fn(async () => ({
+        sandboxID: "e2b-id",
+        templateID: "tmpl",
+        state: "running",
+        endAt: "2030-01-02T03:04:05.000Z",
+      })),
+    });
+    client.pauseSandbox = vi
+      .fn()
+      .mockRejectedValueOnce(new E2BApiError("Service busy", 503))
+      .mockResolvedValueOnce(undefined as never);
+    const provider = new E2BSandboxProvider(client, providerConfig);
+
+    await provider.refreshRuntimeWindow!("e2b-id");
+
+    expect(client.pauseSandbox).toHaveBeenCalledTimes(2);
+    expect(client.connectSandbox).toHaveBeenCalledOnce();
+  });
+
+  it("surfaces non-transient failures to the caller's safety net", async () => {
+    const client = mockClient();
+    client.pauseSandbox = vi.fn().mockRejectedValue(new E2BNotFoundError("gone"));
+    const provider = new E2BSandboxProvider(client, providerConfig);
+
+    await expect(provider.refreshRuntimeWindow!("e2b-id")).rejects.toBeInstanceOf(
+      SandboxProviderError
+    );
+    expect(client.connectSandbox).not.toHaveBeenCalled();
+  });
+
+  it("declares the window-refresh capability", () => {
+    const provider = new E2BSandboxProvider(mockClient(), providerConfig);
+    expect(provider.capabilities.supportsRuntimeWindowRefresh).toBe(true);
+  });
+});

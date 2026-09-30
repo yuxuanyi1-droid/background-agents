@@ -64,6 +64,13 @@ export interface SandboxProviderCapabilities {
   supportsExplicitStop?: boolean;
   /** An ordinary checkpoint must enter the terminal shutdown flow first. */
   snapshotRequiresShutdown?: boolean;
+  /**
+   * The provider can reset a sandbox's continuous-run window in place,
+   * preserving memory and processes (E2B pause→connect). Providers whose
+   * pause is a filesystem-only snapshot cannot: a refresh there would lose
+   * the running turn, which is exactly what the refresh exists to avoid.
+   */
+  supportsRuntimeWindowRefresh?: boolean;
 }
 
 export type SandboxLifetime =
@@ -613,6 +620,14 @@ export interface SandboxProvider {
    * Only available if `capabilities.supportsPersistentResume` is true.
    */
   resumeSandbox?(config: ResumeConfig): Promise<ResumeResult>;
+
+  /**
+   * Reset a running sandbox's continuous-run window in place (E2B
+   * pause→connect), returning the fresh lifetime. Called between turns only;
+   * a provider may reject or throw, leaving the lifetime drain as the
+   * safety net.
+   */
+  refreshRuntimeWindow?(providerObjectId: string, timeoutSeconds?: number): Promise<SandboxLifetime>;
 
   /**
    * Take a filesystem snapshot of the sandbox.

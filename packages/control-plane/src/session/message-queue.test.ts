@@ -237,6 +237,7 @@ function buildQueue(
     terminateUnresponsiveSandbox: vi.fn(async () => {}),
     terminateFailedSandbox: vi.fn(async () => true),
     reportSandboxError: vi.fn((_reason: string) => {}),
+    refreshRuntimeWindowIfStale: vi.fn(async () => false),
   };
   const backgroundTasks = createTestBackgroundTasks();
   const sessionIndex = { touchUpdatedAt: vi.fn(async () => true) };
@@ -1413,6 +1414,37 @@ describe("SessionMessageQueue", () => {
       type: "prompt_queue_updated",
       promptQueue: expect.any(Array),
     });
+  });
+
+  it("defers dispatch while a runtime-window refresh pauses the sandbox", async () => {
+    const h = buildQueue();
+    const sandboxWs = { readyState: 1 } as WebSocket;
+    h.repository.getNextPendingMessage.mockReturnValue(createMessage({ id: "msg-refresh" }));
+    h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
+    h.sandboxLifecycle.refreshRuntimeWindowIfStale.mockResolvedValue(true);
+
+    await h.queue.processMessageQueue();
+
+    // The refresh pause drops this very socket; the runtime's ready event
+    // pumps the queue again, so nothing is claimed or sent this tick.
+    expect(h.sandboxLifecycle.refreshRuntimeWindowIfStale).toHaveBeenCalledOnce();
+    expect(h.repository.startMessageProcessing).not.toHaveBeenCalled();
+    expect(h.wsManager.send).not.toHaveBeenCalled();
+  });
+
+  it("dispatches through when no runtime-window refresh is due", async () => {
+    const h = buildQueue();
+    const sandboxWs = { readyState: 1 } as WebSocket;
+    h.repository.getNextPendingMessage.mockReturnValue(createMessage({ id: "msg-straight" }));
+    h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
+
+    await h.queue.processMessageQueue();
+
+    expect(h.sandboxLifecycle.refreshRuntimeWindowIfStale).toHaveBeenCalledOnce();
+    expect(h.wsManager.send).toHaveBeenCalledWith(
+      sandboxWs,
+      expect.objectContaining({ type: "prompt", messageId: "msg-straight" })
+    );
   });
 
   it("tells the sandbox lifecycle a prompt was dispatched only once the send succeeds", async () => {

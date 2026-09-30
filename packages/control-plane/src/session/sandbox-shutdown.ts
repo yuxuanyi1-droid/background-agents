@@ -316,6 +316,34 @@ export class SandboxShutdownCoordinator {
     this.notifyLifecycleChange();
   }
 
+  /**
+   * Re-record the provider expiry after an in-place runtime-window refresh
+   * (E2B pause→connect between turns). Unlike a startup — whose read may
+   * arrive after a conservative start bound and must not extend it — a
+   * refresh's whole purpose is the LATER expiry the reconnect re-armed, so
+   * the fresh endAt is recorded as-is and the drain alarm re-scheduled.
+   */
+  async recordRuntimeWindowRefresh(lifetime: SandboxLifetime): Promise<void> {
+    const state = this.deps.store.read();
+    if (!state || !this.current(state) || state.phase !== "running") return;
+    if (state.lifecyclePolicy === "legacy" || lifetime.kind !== "finite") return;
+    const settings = parsePersistedSandboxSettings(
+      this.deps.session.getSession()?.sandbox_settings ?? null
+    );
+    const buffer = settings.finalSnapshotBufferMs ?? DEFAULT_FINAL_SNAPSHOT_BUFFER_MS;
+    const next: ShutdownRecord = {
+      ...state,
+      lifetimeKind: "finite",
+      lifetimeSource: lifetime.source,
+      expiresAtMs: lifetime.expiresAtMs,
+      drainAtMs: lifetime.expiresAtMs - buffer,
+    };
+    this.publish(next);
+    if (this.now() >= next.drainAtMs) await this.requestShutdown("sandbox_lifetime_expiring");
+    else await this.deps.alarm.schedule(next.drainAtMs);
+    this.notifyLifecycleChange();
+  }
+
   runtimeReady(version?: 1): void {
     const state = this.deps.store.read();
     if (!state || !this.current(state)) return;
@@ -880,12 +908,12 @@ export class SandboxShutdownCoordinator {
       if (message) {
         next.messageId = message.id;
         if (this.shouldAutoContinue(reason, emergency, message.id, state)) {
-          // The interrupted prompt returns to the queue instead of failing.
-          // With continuationPaused cleared, the committed pause receipt's
-          // saved state reads as "restore_required" → the queue pump spawns
-          // through startupDecision's resume_retained path, and the resumed
-          // sandbox re-dispatches this prompt with a fresh provider TTL.
-          this.deps.messages.updateMessageToPending(message.id);
+          // The interrupted prompt will return to the queue instead of
+          // failing — but only once the resumable pause is confirmed on the
+          // provider (finish()); announcing or requeueing before that would
+          // promise an automatic continuation a failed capture cannot keep.
+          // Until then the message simply stays processing, which the drain's
+          // admission hold already covers.
           next.continuationPaused = false;
           next.autoContinue = {
             messageId: message.id,
@@ -909,16 +937,13 @@ export class SandboxShutdownCoordinator {
     });
     this.announce(next);
     if (continued) {
-      this.deps.log?.info("sandbox.auto_continue", {
-        event: "sandbox.auto_continue",
+      // Confirmation and the user-facing promise land in finish(), once the
+      // provider has actually paused the sandbox.
+      this.deps.log?.info("sandbox.auto_continue_pending", {
+        event: "sandbox.auto_continue_pending",
         message_id: next.messageId,
         count: next.autoContinue?.count,
         reason,
-      });
-      this.broadcast({
-        type: "sandbox_warning",
-        message:
-          "The sandbox reached its lifetime limit; it is being resumed and the prompt will continue automatically.",
       });
     }
     if (failure) this.deps.failures.deliver(failure);
@@ -1239,12 +1264,68 @@ export class SandboxShutdownCoordinator {
     this.deps.sandbox.updateSandboxStatus("stopped");
     this.deps.retireAccess();
     this.publish({ ...state, phase: "saved", sourceRetired: true });
+    this.settleDeferredContinuation(state);
     this.broadcast({ type: "sandbox_status", status: "stopped" });
     this.notifyLifecycleChange();
   }
 
+  /**
+   * Settle the continuation promise a lifetime drain deferred: the resumable
+   * pause is now confirmed, so the interrupted prompt finally returns to the
+   * queue (with continuationPaused clear, the saved state reads
+   * "restore_required" and the next pump resumes and re-dispatches it). A
+   * capture taken without runtime confirmation instead keeps the prompt
+   * held for the user — quiescence was not proven, so an automatic
+   * re-dispatch could double-run unconfirmed work.
+   */
+  private settleDeferredContinuation(state: ShutdownRecord): void {
+    const messageId = state.autoContinue?.messageId;
+    if (!messageId) return;
+    if (state.continuationPaused) {
+      this.deps.log?.warn("sandbox.auto_continue_withheld", {
+        event: "sandbox.auto_continue_withheld",
+        message_id: messageId,
+        reason: "unconfirmed_capture",
+      });
+      const failure = this.deps.failures.record(
+        messageId,
+        INTERRUPTION_MESSAGES[state.reason ?? "sandbox_lifetime_expiring"] ??
+          "The sandbox was stopped.",
+        this.now(),
+        "processing"
+      );
+      if (failure) this.deps.failures.deliver(failure);
+      return;
+    }
+    this.deps.messages.updateMessageToPending(messageId);
+    this.deps.log?.info("sandbox.auto_continue", {
+      event: "sandbox.auto_continue",
+      message_id: messageId,
+      count: state.autoContinue?.count,
+      reason: state.reason,
+    });
+    this.broadcast({
+      type: "sandbox_warning",
+      message:
+        "The sandbox reached its lifetime limit; it is being resumed and the prompt will continue automatically.",
+    });
+  }
+
   private fail(state: ShutdownRecord, phase: "failed" | "unknown", error: string): void {
-    this.publish({ ...state, phase, error });
+    this.publish({ ...state, phase, error, autoContinue: undefined });
+    const messageId = state.autoContinue?.messageId;
+    if (messageId) {
+      // The capture the continuation depended on did not land; the prompt
+      // keeps its terminal interruption instead of a false promise.
+      const failure = this.deps.failures.record(
+        messageId,
+        INTERRUPTION_MESSAGES[state.reason ?? "sandbox_lifetime_expiring"] ??
+          "The sandbox was stopped.",
+        this.now(),
+        "processing"
+      );
+      if (failure) this.deps.failures.deliver(failure);
+    }
     this.broadcast({
       type: "sandbox_warning",
       message: `${phase === "failed" ? "Sandbox save failed" : "Sandbox save could not be confirmed"}: ${error}`,

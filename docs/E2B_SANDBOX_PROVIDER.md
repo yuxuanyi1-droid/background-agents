@@ -51,6 +51,23 @@ deployment flow.
 > On the **Hobby** tier (~1h runtime cap), lower `e2b_sandbox_timeout_seconds` to `3300` and set
 > `sandbox_auto_continue = true` so running prompts continue automatically across the hourly pause.
 
+### Continuous-run window refresh (transparent continuation)
+
+E2B's hourly cap is a **continuous-run** limit: `pause → connect` resets the window while the
+memory pause keeps every process (bridge, resident vendor, conversation state) exactly where it
+froze. Open-Inspect uses that between turns: when a prompt is about to dispatch and less than 20
+minutes of the window remain, the sandbox is paused and reconnected first (a ~5–30s hiccup; the
+runtime's ready event re-pumps the queue and the prompt dispatches). Sessions therefore run
+indefinitely as long as each turn fits the window — no drain, no re-dispatch.
+
+A turn that outlasts the window still falls back to the lifetime drain: the sandbox is paused
+(again memory-preserving) and, with `sandbox_auto_continue = true`, the interrupted prompt is
+requeued and re-dispatched after the resume — but only once the resumable pause is confirmed on
+the provider, so a failed capture never promises an automatic continuation it cannot keep. Note
+the re-dispatch restarts the turn; it is not a mid-turn checkpoint. This refresh-and-continue
+behavior is E2B-only: other providers' pauses are filesystem snapshots (a refresh would lose the
+running turn) or have no continuous-run window at all.
+
 ## Template Build
 
 E2B sandboxes boot from a **template** image that contains:
