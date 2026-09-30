@@ -17,6 +17,7 @@ import {
   type PromptRequestIdentity,
 } from "@/lib/prompt-request-id";
 import { restoreQueuedPrompt } from "@/lib/restore-queued-prompt";
+import { readSessionDraft, writeSessionDraft } from "@/lib/session-drafts";
 import { matchesShortcut } from "@/lib/keyboard-shortcuts";
 
 const TYPING_DEBOUNCE_MS = 300;
@@ -47,10 +48,25 @@ export function usePromptInput(
     .map((attachment) => attachment.id)
     .join("\u0000");
   const promptRef = useRef(prompt);
-  const setPrompt = useCallback((value: string) => {
-    promptRef.current = value;
-    setPromptState(value);
-  }, []);
+  const setPrompt = useCallback(
+    (value: string) => {
+      promptRef.current = value;
+      setPromptState(value);
+      writeSessionDraft(sessionId, value);
+    },
+    [sessionId]
+  );
+
+  // Adopt the persisted draft after hydration, so the server and client render
+  // the same markup. A draft only adopts into an untouched composer: typing
+  // before the effect runs must win over stale storage.
+  useEffect(() => {
+    const draft = readSessionDraft(sessionId);
+    if (draft !== "" && promptRef.current === "") {
+      promptRef.current = draft;
+      setPromptState(draft);
+    }
+  }, [sessionId]);
 
   const clearTypingTimeout = useCallback(() => {
     if (typingTimeoutRef.current) {

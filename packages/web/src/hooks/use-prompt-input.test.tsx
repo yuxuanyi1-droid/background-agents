@@ -2,7 +2,7 @@
 /// <reference types="@testing-library/jest-dom" />
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import * as matchers from "@testing-library/jest-dom/matchers";
 import {
   DEFAULT_KEYBOARD_SHORTCUTS,
@@ -35,13 +35,15 @@ vi.mock("@/hooks/use-session-attachments", () => ({
 
 function PromptHarness({
   canSubmit,
+  sessionId = "session-1",
   sendShortcut = DEFAULT_KEYBOARD_SHORTCUTS["send-prompt"],
 }: {
   canSubmit: boolean;
+  sessionId?: string;
   sendShortcut?: KeyboardShortcutBinding;
 }) {
   const prompt = usePromptInput(
-    "session-1",
+    sessionId,
     mocks.sendPrompt,
     mocks.sendTyping,
     "model-1",
@@ -67,6 +69,7 @@ beforeEach(() => {
   mocks.sendTyping.mockReset();
   mocks.clearAttachments.mockReset();
   mocks.uploadAll.mockReset();
+  localStorage.clear();
 });
 
 afterEach(cleanup);
@@ -119,5 +122,43 @@ describe("usePromptInput", () => {
     fireEvent.keyDown(input, { key: "Enter", code: "Enter", shiftKey });
 
     expect(mocks.sendPrompt).toHaveBeenCalledOnce();
+  });
+
+  it("restores the session's stored draft after hydration and persists edits", async () => {
+    localStorage.setItem("session-prompt-draft:session-1", "Half-finished thought");
+    render(<PromptHarness canSubmit={false} />);
+
+    const input = screen.getByRole("textbox", { name: "Prompt" });
+    await waitFor(() => expect(input).toHaveValue("Half-finished thought"));
+
+    fireEvent.change(input, { target: { value: "Edited thought" } });
+    expect(localStorage.getItem("session-prompt-draft:session-1")).toBe("Edited thought");
+  });
+
+  it("keeps drafts per session: another session's draft does not leak in", () => {
+    localStorage.setItem("session-prompt-draft:session-2", "Other session");
+    render(<PromptHarness canSubmit={false} sessionId="session-1" />);
+
+    const input = screen.getByRole("textbox", { name: "Prompt" });
+    expect(input).toHaveValue("");
+  });
+
+  it("clears the stored draft once the prompt is submitted", async () => {
+    mocks.sendPrompt.mockResolvedValue({ ok: true });
+    render(
+      <PromptHarness
+        canSubmit
+        sendShortcut={{ code: "Enter", primary: true, alt: false, shift: false }}
+      />
+    );
+    const input = screen.getByRole("textbox", { name: "Prompt" });
+    fireEvent.change(input, { target: { value: "Ship it" } });
+    expect(localStorage.getItem("session-prompt-draft:session-1")).toBe("Ship it");
+
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter", ctrlKey: true });
+
+    await waitFor(() => expect(mocks.sendPrompt).toHaveBeenCalledOnce());
+    await waitFor(() => expect(input).toHaveValue(""));
+    expect(localStorage.getItem("session-prompt-draft:session-1")).toBeNull();
   });
 });
