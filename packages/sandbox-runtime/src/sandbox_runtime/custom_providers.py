@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -230,65 +231,95 @@ def custom_anthropic_env(provider: CustomProvider) -> dict[str, str]:
     return env
 
 
-def codex_wire_api(provider: CustomProvider) -> str:
-    """The Codex CLI ``wire_api`` value for an OpenAI-protocol provider."""
-    if not provider.is_openai_protocol:
-        raise ValueError(f"Codex cannot run Anthropic-protocol provider {provider.provider_key!r}")
-    return "responses" if provider.protocol == _OPENAI_RESPONSES_PROTOCOL else "chat"
-
-
 def _toml_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def codex_model_provider_entries(providers: tuple[CustomProvider, ...]) -> str:
-    """``[model_providers.*]`` TOML sections for the OpenAI-protocol providers.
+_MANAGED_CODEX_SECTION = re.compile(r"^\[model_providers\.(cp[ao]-[0-9a-f]{8})\]$")
 
-    Codex appends the wire path itself (``/responses`` or ``/chat/completions``)
-    to ``base_url``, which gateways document WITH the version segment — the
-    opposite convention of Claude Code — so the registered URL passes through
-    unchanged. The key never rides the file: the CLI reads it from ``env_key``,
-    a variable the supervisor's environment already carries.
+
+def codex_model_provider_entries(providers: tuple[CustomProvider, ...]) -> str:
+    """``[model_providers.*]`` TOML sections for the Responses-protocol providers.
+
+    Codex appends the wire path itself (``/responses``) to ``base_url``, which
+    gateways document WITH the version segment — the opposite convention of
+    Claude Code — so the registered URL passes through unchanged. The key never
+    rides the file: the CLI reads it from ``env_key``, a variable the
+    supervisor's environment already carries.
+
+    Chat-completions gateways are not registered: the CLI removed
+    ``wire_api = "chat"`` support and refuses to load a config that still
+    carries it, so those routes belong to the Pi and dsh harnesses.
     """
     sections: list[str] = []
     for provider in providers:
-        if not provider.is_openai_protocol:
+        if provider.protocol != _OPENAI_RESPONSES_PROTOCOL:
             continue
         sections.append(
             f"[model_providers.{provider.provider_key}]\n"
             f'name = "{_toml_escape(provider.provider_key)}"\n'
             f'base_url = "{_toml_escape(provider.base_url)}"\n'
             f'env_key = "{_toml_escape(provider.api_key_env)}"\n'
-            f'wire_api = "{codex_wire_api(provider)}"\n'
+            f'wire_api = "responses"\n'
         )
     return "\n".join(sections)
 
 
-def write_codex_model_providers(config_path: Path, providers: tuple[CustomProvider, ...]) -> bool:
-    """Merge the custom-provider sections into the Codex CLI's ``config.toml``.
+def _strip_managed_codex_sections(existing: str) -> str:
+    """Drop our ``[model_providers.cp[ao]-…]`` sections, keeping the rest.
 
-    Idempotent: a section already present (a resumed session re-opening the
-    harness) is left untouched, and unknown pre-existing content is preserved
-    verbatim. Returns whether anything was written.
+    Custom provider keys are exclusively ours, so every section under one is
+    managed: this both deduplicates re-runs and purges a ``wire_api = "chat"``
+    section an earlier run wrote, which the CLI now refuses to load.
     """
-    entries = codex_model_provider_entries(providers)
-    if not entries:
-        return False
-    sections = [section for section in entries.split("\n\n") if section.strip()]
+
+    def is_section_header(line: str) -> bool:
+        stripped = line.strip()
+        return stripped.startswith("[") and stripped.endswith("]")
+
+    lines = existing.splitlines(keepends=True)
+    kept: list[str] = []
+    dropping = False
+    for line in lines:
+        if _MANAGED_CODEX_SECTION.match(line.strip()):
+            dropping = True
+            continue
+        if dropping and is_section_header(line):
+            dropping = False
+        if not dropping:
+            kept.append(line)
+    # Collapse the blank lines a dropped section leaves behind.
+    text = "".join(kept)
+    while "\n\n\n" in text:
+        text = text.replace("\n\n\n", "\n\n")
+    return text
+
+
+def write_codex_model_providers(config_path: Path, providers: tuple[CustomProvider, ...]) -> bool:
+    """Rewrite the custom-provider sections in the Codex CLI's ``config.toml``.
+
+    Idempotent: our sections are replaced wholesale with the current set (a
+    resumed session re-opening the harness, or purging a section a provider
+    lost), while unknown pre-existing content is preserved verbatim. Returns
+    whether anything was written.
+    """
     config_path.parent.mkdir(parents=True, exist_ok=True)
     existing = config_path.read_text() if config_path.exists() else ""
-    present = {
-        line.strip()
-        for line in existing.splitlines()
-        if line.strip().startswith("[model_providers.")
-    }
-    missing = [section for section in sections if section.splitlines()[0].strip() not in present]
-    if not missing:
-        return False
-    merged = existing.rstrip("\n")
+    body = _strip_managed_codex_sections(existing).rstrip("\n")
+    fresh = [
+        section
+        for section in codex_model_provider_entries(providers).split("\n\n")
+        if section.strip()
+    ]
+    merged = body
+    for section in fresh:
+        if merged:
+            merged += "\n\n"
+        merged += section.rstrip("\n")
     if merged:
-        merged += "\n\n"
-    merged += "\n\n".join(section.rstrip("\n") for section in missing) + "\n"
+        merged += "\n"
+    if merged == existing:
+        return False
     config_path.write_text(merged)
     return True
 

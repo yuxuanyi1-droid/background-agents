@@ -10,7 +10,6 @@ import pytest
 from sandbox_runtime.custom_providers import (
     CUSTOM_PROVIDERS_ENV,
     codex_model_provider_entries,
-    codex_wire_api,
     custom_anthropic_env,
     find_provider_for_model,
     load_custom_providers,
@@ -163,27 +162,12 @@ def test_responses_protocol_parses_and_routes():
     provider = providers[0]
     assert provider.is_openai_protocol
     assert not provider.is_anthropic_protocol
-    assert codex_wire_api(provider) == "responses"
+    assert provider.protocol == "openai_responses"
     resolved = find_provider_for_model("cpo-55443322/gpt-x", providers)
     assert resolved is not None and resolved[0] is provider
 
 
-def test_codex_wire_api_distinguishes_the_openai_protocols():
-    providers = load_custom_providers(
-        {
-            CUSTOM_PROVIDERS_ENV: json.dumps([responses_manifest(), openai_manifest()]),
-            "CP_55443322_API_KEY": "sk-r",
-            "CP_99887766_API_KEY": "sk-c",
-        }
-    )
-    by_key = {provider.provider_key: provider for provider in providers}
-    assert codex_wire_api(by_key["cpo-55443322"]) == "responses"
-    assert codex_wire_api(by_key["cpo-99887766"]) == "chat"
-    with pytest.raises(ValueError):
-        codex_wire_api(load_custom_providers(manifest_env(anthropic_manifest()))[0])
-
-
-def test_codex_entries_cover_openai_protocols_only():
+def test_codex_entries_cover_responses_protocol_only():
     providers = load_custom_providers(
         {
             CUSTOM_PROVIDERS_ENV: json.dumps(
@@ -196,17 +180,28 @@ def test_codex_entries_cover_openai_protocols_only():
     )
     entries = codex_model_provider_entries(providers)
     assert "[model_providers.cpo-55443322]" in entries
-    assert "[model_providers.cpo-99887766]" in entries
+    # Chat-completions gateways are not registered: the CLI removed
+    # wire_api = "chat" and refuses to load a config carrying it.
+    assert "cpo-99887766" not in entries
     assert "cpa-00112233" not in entries
     assert 'wire_api = "responses"' in entries
-    assert 'wire_api = "chat"' in entries
-    assert "sk-r" not in entries and "sk-c" not in entries
+    assert 'wire_api = "chat"' not in entries
+    assert "sk-r" not in entries
 
 
 def test_write_codex_model_providers_is_idempotent_and_preserves_content(tmp_path: Path):
     config = tmp_path / ".codex" / "config.toml"
     config.parent.mkdir(parents=True)
-    config.write_text('model = "gpt-5"\n\n[model_providers.existing]\nname = "existing"\n')
+    config.write_text(
+        'model = "gpt-5"\n\n'
+        "[model_providers.existing]\n"
+        'name = "existing"\n\n'
+        "[model_providers.cpo-99887766]\n"
+        'name = "cpo-99887766"\n'
+        'base_url = "https://stale.example/v1"\n'
+        'env_key = "CP_99887766_API_KEY"\n'
+        'wire_api = "chat"\n'
+    )
     providers = load_custom_providers(
         {
             CUSTOM_PROVIDERS_ENV: json.dumps([responses_manifest()]),
@@ -219,6 +214,10 @@ def test_write_codex_model_providers_is_idempotent_and_preserves_content(tmp_pat
     assert 'model = "gpt-5"' in merged
     assert "[model_providers.existing]" in merged
     assert "[model_providers.cpo-55443322]" in merged
+    # The stale chat section an earlier run wrote is purged, not preserved:
+    # the CLI refuses to load any config still carrying wire_api = "chat".
+    assert "cpo-99887766" not in merged
+    assert 'wire_api = "chat"' not in merged
     assert 'base_url = "https://responses-gateway.example/v1"' in merged
     assert 'env_key = "CP_55443322_API_KEY"' in merged
 

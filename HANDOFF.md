@@ -182,9 +182,16 @@ packages/provider-node/src/provider-config-file-codec.ts，字段 schema 见
 packages/provider/src/config/{provider-data-schema,model-config 由 shared/model-config}.ts，
 内置范例 /opt/openinspect/zcode/config/provider/zcode-builtin.json。
 
+**codex wire_api=chat 移除修复（2026-09-30 已上线，模板 689f563bedb6）**：codex CLI 新版拒绝
+加载含 `wire_api = "chat"` 的 config.toml（openai/codex#7782）。写入器改为**只登记
+openai_responses 网关**（chat 协议路由到 pi/dsh），且**整体重写受管段**——先剥掉文件里所有
+`[model_providers.cp[ao]-xxxxxxxx]` 段（含历史遗留的 chat 段，否则恢复的沙箱仍拒载）再追加当前
+responses 集；`codex_wire_api()` 已删除。web 门控上一轮已是 responses-only，两侧对齐。新模板实测：
+chat 段被清除、非受管内容保留、codex exec 正常加载配置。
+
 **剩余收尾**：
 
-1. 用户实测 dsh（修后）与 pi；codex 菜单只剩 Responses 协议网关
+1. 用户实测 dsh / pi / codex（均修后）
 2. zcode：app-server 协议驱动重写 + provider_config.json staging + 放开 zcode 模型族
 
 **owner 提权（2026-09-29 已完成）**：用户首次登录后（canonical id
