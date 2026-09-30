@@ -19,6 +19,7 @@ Session continuity differs by vendor:
 
 from __future__ import annotations
 
+import time
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -428,6 +429,11 @@ class PiVendor:
     json_stream = True
     resident = True
     jsonrpc = False
+    # A terminal assistant message is authoritative on its own; agent_settled
+    # only confirms pi stopped its post-turn bookkeeping, which has been
+    # observed to hang. Settle shortly after the answer instead of spending
+    # the whole inactivity budget waiting for the confirmation.
+    settle_after_final_message = 60.0
 
     def __init__(self) -> None:
         # The rpc server is probed once per process; the model and thinking
@@ -661,6 +667,9 @@ class PiVendor:
         if message.get("stopReason") == "error":
             detail = str(message.get("errorMessage") or "Pi reported a provider error")
             events += error_event(state, detail)
+        elif message.get("stopReason") not in (None, "aborted"):
+            # stopReason "stop" (or a vendor alias): the final answer landed.
+            state.final_message_seen_at = time.monotonic()
         final_text = _as_text(message.get("content"))
         if final_text and len(final_text) > len(state.text):
             events += text_events(state, final_text)

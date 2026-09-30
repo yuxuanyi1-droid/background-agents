@@ -27,6 +27,7 @@ import json
 import os
 import shutil
 import signal
+import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
@@ -67,6 +68,7 @@ class CliTurnState:
     last_emitted_text: str = ""
     session_id: str | None = None
     server_turn_id: str | None = None
+    final_message_seen_at: float | None = None
     error: str | None = None
     emitted_error: bool = False
     cost_usd: float | None = None
@@ -247,6 +249,13 @@ class ResidentCliVendor(Protocol):
         permission or input prompt nobody answers would hang the turn."""
         ...
 
+    settle_after_final_message: float
+    """Grace seconds after the vendor marks ``state.final_message_seen_at``
+    before the turn settles without its own terminal notification — for
+    vendors whose final assistant message is authoritative (Pi) but whose
+    settle event can be late or lost in a post-turn hang. Zero (default)
+    disables it: only the vendor's terminal notification settles."""
+
 
 @runtime_checkable
 class CliVendor(Protocol):
@@ -317,6 +326,16 @@ class CliTurnSettled(Exception):
         self.events = events or []
 
 
+class CliServerDied(Exception):
+    """A resident protocol server exited while its turn was still open."""
+
+
+# Queued by the stdout reader when it stops — EOF, cancellation, or a crash —
+# so the consume loop learns of a dead server instead of idling to the
+# inactivity budget.
+_SERVER_EXITED = object()
+
+
 class _ResidentServer:
     """A resident vendor protocol server: one process, many turns.
 
@@ -385,26 +404,29 @@ class _ResidentServer:
             await self.request(message)
 
     async def _read_stdout(self, stream: asyncio.StreamReader) -> None:
-        while True:
-            line = await stream.readline()
-            if not line:
-                return
-            text = line.decode("utf-8", errors="replace").strip()
-            if not text:
-                continue
-            try:
-                message = json.loads(text)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(message, dict):
-                continue
-            request_id = message.get("id")
-            if isinstance(request_id, str) and request_id in self._pending:
-                future = self._pending.pop(request_id)
-                if not future.done():
-                    future.set_result(message)
-            else:
-                self._notifications.put_nowait(message)
+        try:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    return
+                text = line.decode("utf-8", errors="replace").strip()
+                if not text:
+                    continue
+                try:
+                    message = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(message, dict):
+                    continue
+                request_id = message.get("id")
+                if isinstance(request_id, str) and request_id in self._pending:
+                    future = self._pending.pop(request_id)
+                    if not future.done():
+                        future.set_result(message)
+                else:
+                    self._notifications.put_nowait(message)
+        finally:
+            self._notifications.put_nowait(_SERVER_EXITED)
 
     async def _drain_stderr(self, stream: asyncio.StreamReader) -> None:
         tail: deque[str] = deque(maxlen=16)
@@ -455,6 +477,17 @@ class _ResidentServer:
             return await asyncio.wait_for(self._notifications.get(), timeout)
         except TimeoutError:
             return None
+
+    async def exit_details(self) -> tuple[int | None, str]:
+        """The server's exit code and stderr tail, once its stdout closed."""
+        process = self._process
+        if process is None:
+            return None, self._stderr_tail
+        if process.returncode is None:
+            with contextlib.suppress(Exception):
+                async with asyncio.timeout(1.0):
+                    await process.wait()
+        return process.returncode, self._stderr_tail
 
     def drop_queued_notifications(self) -> None:
         while not self._notifications.empty():
@@ -734,6 +767,8 @@ class CliHarness:
             )
         except CliInactivityTimeout as error:
             timeout_error = error
+        except CliServerDied as error:
+            timeout_error = error
         except asyncio.CancelledError:
             await server.kill()
             raise
@@ -750,11 +785,29 @@ class CliHarness:
     ) -> None:
         vendor: ResidentCliVendor = self.vendor  # type: ignore[assignment]
         while True:
-            message = await server.next_notification(self.limits.inactivity_timeout_seconds)
+            wait = self.limits.inactivity_timeout_seconds
+            if state.final_message_seen_at is not None:
+                grace = getattr(vendor, "settle_after_final_message", 0.0) or 0.0
+                remaining = grace - (time.monotonic() - state.final_message_seen_at)
+                if remaining <= 0:
+                    # The vendor's authoritative final answer landed; its own
+                    # settle event is late or never coming (a post-turn hang),
+                    # and the answer is not worth the inactivity budget.
+                    return
+                wait = min(wait, remaining)
+            message = await server.next_notification(wait)
             if message is None:
+                if state.final_message_seen_at is not None:
+                    return
                 raise CliInactivityTimeout(
                     f"No output for {self.limits.inactivity_timeout_seconds:.0f}s."
                 )
+            if message is _SERVER_EXITED:
+                code, tail = await server.exit_details()
+                detail = f"The {self.id.value} protocol server exited mid-turn (code {code})."
+                if tail:
+                    detail += f" Stderr tail: {tail[-STDERR_TAIL_CHARS:]}"
+                raise CliServerDied(detail)
             for reply in vendor.server_request_messages(message):
                 # Server→client requests must be answered — a permission or
                 # input prompt nobody replies to would hang the turn. Replies

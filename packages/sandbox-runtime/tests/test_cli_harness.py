@@ -412,3 +412,55 @@ async def test_resident_inactivity_timeout_kills_the_server(tmp_path: Path) -> N
     assert "No output" in (outcome.error or "")
     # The wedged server must not survive into the next turn.
     assert harness._server is None
+
+
+@pytest.mark.asyncio
+async def test_resident_server_death_fails_fast_with_exit_details(tmp_path: Path) -> None:
+    # A server that dies mid-turn must fail the turn immediately with its exit
+    # code and stderr tail, not idle to the inactivity budget.
+    script = (
+        _SERVER_HEAD + "    elif kind == 'prompt':\n"
+        "        send({'id': message['id'], 'result': {'accepted': True}})\n"
+        "        send({'type': 'delta', 'text': 'Half'})\n"
+        "        import sys\n"
+        "        print('fatal: heap exhausted', file=sys.stderr, flush=True)\n"
+        "        sys.exit(3)\n"
+    )
+    harness = _harness(_ResidentScriptVendor(script), tmp_path)
+    await harness.create_session()
+    outcome, _ = await _run(harness)
+    assert not outcome.success
+    error = outcome.error or ""
+    assert "exited mid-turn" in error and "code 3" in error
+    assert "heap exhausted" in error
+
+
+@pytest.mark.asyncio
+async def test_resident_settles_after_the_final_message_grace(tmp_path: Path) -> None:
+    # Pi semantics: a terminal assistant message is authoritative, so a
+    # settle event that never arrives costs a bounded grace, not the whole
+    # inactivity budget.
+    script = (
+        _SERVER_HEAD + "    elif kind == 'prompt':\n"
+        "        send({'id': message['id'], 'result': {'accepted': True}})\n"
+        "        send({'type': 'delta', 'text': 'Answer'})\n"
+        "        send({'type': 'final_message'})\n"
+        "        import time\n"
+        "        time.sleep(600)\n"
+    )
+
+    class _GraceVendor(_ResidentScriptVendor):
+        settle_after_final_message = 0.5
+
+        def parse_server_message(self, message: dict[str, Any], state: CliTurnState) -> list[Any]:
+            if message.get("type") == "final_message":
+                state.final_message_seen_at = __import__("time").monotonic()
+                return []
+            return super().parse_server_message(message, state)
+
+    harness = _harness(_GraceVendor(script), tmp_path)
+    await harness.create_session()
+    outcome, events = await _run(harness)
+    assert outcome.success
+    assert events[-1]["type"] == "step_finish"
+    await harness.close()
