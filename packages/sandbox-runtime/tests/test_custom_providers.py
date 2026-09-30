@@ -286,7 +286,7 @@ def test_dsh_patch_declares_routes_and_selection():
     assert "        api: anthropic-messages" in text
     assert '        apiKeyEnv: "CP_00112233_API_KEY"' in text
     assert "            contextWindow: 200000" in text
-    assert '            reasoningEfforts: ["high"]' in text
+    assert '            reasoningEfforts: {"high": "high"}' in text
 
     selection = dsh_model_selection_patch("cpo-99887766", "glm-4.7", "none")
     assert 'provider: "cpo-99887766"' in selection

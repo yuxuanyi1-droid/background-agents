@@ -395,10 +395,16 @@ def dsh_profile_patch_entries(providers: tuple[CustomProvider, ...]) -> list[str
                 lines.append(f"            contextWindow: {int(model.context_window_tokens)}")
                 lines.append(f"            maxTokens: {int(model.max_output_tokens)}")
                 lines.append("            input: [text]")
-                efforts = [effort for effort in model.reasoning_efforts if effort != "none"]
+                # dsh's schema is a map from thinking level to the wire value
+                # dispatch should send, not a list; the identity mapping sends
+                # the level name itself, which every supported protocol accepts.
+                efforts = {effort: effort for effort in model.reasoning_efforts if effort != "none"}
                 if efforts:
-                    rendered = ", ".join(_yaml_scalar(effort) for effort in efforts)
-                    lines.append(f"            reasoningEfforts: [{rendered}]")
+                    rendered = ", ".join(
+                        f"{_yaml_scalar(level)}: {_yaml_scalar(wire)}"
+                        for level, wire in efforts.items()
+                    )
+                    lines.append(f"            reasoningEfforts: {{{rendered}}}")
     return lines if len(lines) > 4 else []
 
 

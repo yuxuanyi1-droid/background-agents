@@ -158,10 +158,34 @@ automations 表单（automation-form-policy + customModelEfforts helper）。未
 （CF 侧独立部署，本栈不跑）。测试 CP 5317 / web 1986 全过，镜像已重建上线。**回归验证方法**：建会话
 选 max → 重进会话应仍显示 max；查库 `sessions/<id>.db` 的 session 行 reasoning_effort 应为 max。
 
+**dsh reasoningEfforts 格式修复（2026-09-30 已上线，模板 0ebe7efa6091）**：dsh 的模型
+`reasoningEfforts` 不是等级数组而是 `{等级: 线上值}` 映射（仅 "off" 可留空、必须至少一个非 off
+等级）——数组格式使整个 llm-pi-ai 服务校验失败不激活（NO_ADAPTER）。已改为恒等映射
+`{"high": "high", ...}`，新模板实测：服务激活、`--patch` 选模型后回合真实到达自定义端点。
+注意实证细节：`cordis.patch.yml` 里 llm-pi-ai 的 config 覆盖生效，但 agent-default-model 的
+config 覆盖在用户层不生效（原因未深究）——每回合选模型必须走 `--patch` 叠加（vendor 已如此）。
+
+**zcode 结论（2026-09-30 研究完毕，实现待做）**：zcode 0.16.9 的 `--prompt` 对新会话**不做模型
+种子**——defaultModelSelection 只进 TUI 路径（tui-prompt-handler-runtime 消费），runtimeConfig
+无 modelSelection 项、CLI 无 --model 参数（AgentRuntime 从 config.modelSelection 初始化，
+prompt-command 不传）。内置 provider 做默认选择同样报 "Select a model before continuing"（已实证），
+即 vendor docstring 所指 "v3.14.3 源码构建" 的行为已随版本漂移失效。**正确路径：把 ZcodeVendor
+改造为 `zcode app-server`（ZCode Protocol stdio）驱动**——常驻进程、setModel 指令 + 回合提交，
+这也是 ZCode 官方的无头集成方式。provider 注册侧已全部探明：`~/.zcode/v2/provider_config.json`
+（`{schemaVersion:1, config:{providerConfigRules:{providerRules:{<id>:{access:{type:"api-key",apiKey},
+api:{type:"anthropic-messages"|"openai-chat-completions"|"openai-responses", baseUrl, headers?},
+personalModelIds}}}, modelConfigRules:{providerModelRules:[], manualProviderModelRules:[{providerId,
+modelId, config:{enabled, properties:{...全字段必填}, optionSpecs:{reasoningLevel:{values,map},
+maxOutputTokens:{max,map}}}}]}, defaultModelSelection}}`；map 是编译表达式字符串，恒等式
+`{"reasoning_effort": reasoningLevel}`（OpenAI 系）；文件 schema 见
+packages/provider-node/src/provider-config-file-codec.ts，字段 schema 见
+packages/provider/src/config/{provider-data-schema,model-config 由 shared/model-config}.ts，
+内置范例 /opt/openinspect/zcode/config/provider/zcode-builtin.json。
+
 **剩余收尾**：
 
-1. 用户实测：pi 选 cpo/cpa 模型发消息（思考等级可选）；dsh 现在也能选自定义模型；codex 菜单只剩 Responses 协议的网关模型
-2. zcode 自定义 provider（见上）
+1. 用户实测 dsh（修后）与 pi；codex 菜单只剩 Responses 协议网关
+2. zcode：app-server 协议驱动重写 + provider_config.json staging + 放开 zcode 模型族
 
 **owner 提权（2026-09-29 已完成）**：用户首次登录后（canonical id
 `462d0b1645a0e34d9a6eb55b16a860e3`）用仓库 `scripts/bootstrap-workspace-owner.ts` 导出的
