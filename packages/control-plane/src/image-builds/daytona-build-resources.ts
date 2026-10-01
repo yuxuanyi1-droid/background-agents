@@ -105,6 +105,8 @@ export interface DaytonaImageBuildResourcesConfig {
 // Resources
 // ---------------------------------------------------------------------------
 
+const SNAPSHOT_ACTIVATION_POLL_MS = 2_000;
+
 export class DaytonaImageBuildResources {
   constructor(
     private readonly client: DaytonaRestClient,
@@ -132,6 +134,7 @@ export class DaytonaImageBuildResources {
     const expiresAt = Date.now() + ttlMinutes * MS_PER_MINUTE;
 
     try {
+      await this.ensureBaseSnapshotActive();
       const params: DaytonaCreateSandboxParams = {
         name: sourceName,
         snapshot: this.client.requireBaseSnapshot(),
@@ -401,6 +404,37 @@ export class DaytonaImageBuildResources {
   }
 
   /** Wait for one expected state, failing fast on a terminal one. */
+  /**
+   * Daytona archives idle snapshots; a create against an inactive one fails
+   * with a bare 400. The runtime provider activates on spawn — the build path
+   * owes the same guarantee before creating its source sandbox.
+   */
+  private async ensureBaseSnapshotActive(signal?: AbortSignal): Promise<void> {
+    const name = this.client.requireBaseSnapshot();
+    const snapshot = await getDaytonaSnapshot(this.client, name, signal);
+    if (!snapshot) throw new Error(`Daytona base snapshot ${name} not found`);
+    const state = parseDaytonaSnapshotState(snapshot.state);
+    if (state === "active") return;
+    if (state !== "inactive") {
+      throw new Error(`Daytona base snapshot is ${state} and cannot be used`);
+    }
+    await this.client.activateSnapshot(snapshot.id, signal);
+    for (;;) {
+      const current = await getDaytonaSnapshot(this.client, snapshot.id, signal);
+      if (!current) throw new Error("Daytona base snapshot disappeared during activation");
+      const currentState = parseDaytonaSnapshotState(current.state);
+      if (currentState === "active") return;
+      if (
+        currentState === "error" ||
+        currentState === "build_failed" ||
+        currentState === "removing"
+      ) {
+        throw new Error(`Daytona base snapshot activation ended ${currentState}`);
+      }
+      await delayUnlessCancelled(SNAPSHOT_ACTIVATION_POLL_MS, signal);
+    }
+  }
+
   private async awaitSandboxState(
     providerSessionId: string,
     expected: DaytonaSandboxState,
