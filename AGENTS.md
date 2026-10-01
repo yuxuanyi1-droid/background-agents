@@ -171,6 +171,19 @@ Pushing to `main` auto-deploys changed services:
 
 CI runs lint, typecheck, and tests for all TypeScript and Python packages on every push and PR.
 
+## Sandbox environment
+
+Dependencies are NOT installed at session start (boot is clone-only). Reading
+and editing code needs nothing. Before the first test/typecheck/build in a
+session, install them:
+
+```bash
+npm install
+npm run build -w @open-inspect/shared
+# Python packages only when touching them:
+cd packages/modal-infra && uv sync --frozen && cd -
+```
+
 ## Further Reading
 
 - [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — deploy your own instance
