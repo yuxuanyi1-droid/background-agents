@@ -153,6 +153,7 @@ export function SessionRightSidebarContent({
           createdAt={sessionState.createdAt}
           model={sessionState.model}
           reasoningEffort={sessionState.reasoningEffort}
+          sandboxProvider={sessionState.sandboxProvider}
           baseBranch={sessionState.baseBranch}
           branchName={sessionState.branchName || undefined}
           repoOwner={sessionState.repoOwner}

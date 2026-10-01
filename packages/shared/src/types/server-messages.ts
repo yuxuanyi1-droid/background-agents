@@ -1,4 +1,5 @@
 import { DEFAULT_HARNESS, harnessIdSchema } from "../harnesses";
+import { sandboxProviderNameSchema } from "./integrations";
 import { z } from "zod";
 import { sessionArtifactSchema } from "./artifacts";
 import { sessionRepositoryStateSchema } from "./repositories";
@@ -32,6 +33,12 @@ const sessionStateSchema = z.object({
    * an absent value.
    */
   harness: harnessIdSchema.default(DEFAULT_HARNESS),
+  /**
+   * Sandbox backend the session runs on; fixed at create. Absent from
+   * producers that predate per-session selection — readers fall back to the
+   * deployment default rather than treating absence as its own state.
+   */
+  sandboxProvider: sandboxProviderNameSchema.nullish(),
   model: z.string().optional(),
   reasoningEffort: z.string().optional(),
   isProcessing: z.boolean().optional(),

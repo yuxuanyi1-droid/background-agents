@@ -1,4 +1,5 @@
 import { getValidHarnessOrDefault } from "@open-inspect/shared/harnesses";
+import { isSandboxProviderName } from "@open-inspect/shared/types/integrations";
 import {
   sessionSnapshotSchema,
   type SessionSnapshotState,
@@ -104,6 +105,9 @@ export class SessionSnapshotReader {
       messageCount: this.deps.messageRepository.getMessageCount(),
       createdAt: session.created_at,
       harness: getValidHarnessOrDefault(session.harness),
+    sandboxProvider: session.sandbox_provider !== null && isSandboxProviderName(session.sandbox_provider)
+      ? session.sandbox_provider
+      : null,
       model: session.model ?? DEFAULT_MODEL,
       reasoningEffort: session.reasoning_effort ?? undefined,
       isProcessing: this.getIsProcessing(),

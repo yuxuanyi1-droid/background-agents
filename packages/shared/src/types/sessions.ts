@@ -1,4 +1,5 @@
 import { harnessIdSchema, type HarnessId } from "../harnesses";
+import { sandboxProviderNameSchema } from "./integrations";
 import { z } from "zod";
 import { resolvedSessionAttachmentsSchema } from "./session-attachments";
 import { eventResponseSchema } from "./sandbox-events";

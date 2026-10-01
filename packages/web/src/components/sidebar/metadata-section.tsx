@@ -8,6 +8,10 @@ import { getSafeExternalUrl } from "@/lib/urls";
 import { getScmBranchUrl, getScmRepoUrl } from "@/lib/scm";
 import { NO_REPOSITORY_LABEL } from "@/lib/repo-label";
 import type { Artifact, SandboxEvent } from "@/types/session";
+import {
+  SANDBOX_PROVIDER_LABELS,
+  type SandboxProviderName,
+} from "@open-inspect/shared/types/integrations";
 import type { SessionRepositoryState } from "@open-inspect/shared/types/repositories";
 import { listPrArtifacts, listPrArtifactsForRepo } from "@/lib/pr-artifacts";
 import { browserApiFetch } from "@/lib/browser-api-fetch";
@@ -23,6 +27,7 @@ import {
   LinkIcon,
   ErrorIcon,
   RefreshIcon,
+  BoxIcon,
 } from "@/components/ui/icons";
 import { Badge } from "@/components/ui/badge";
 import { prBadgeVariant } from "@/components/ui/badge-variants";
@@ -35,6 +40,8 @@ interface MetadataSectionProps {
   createdAt: number;
   model?: string;
   reasoningEffort?: string;
+  /** Sandbox backend the session runs on; read-only — fixed at create. */
+  sandboxProvider?: string | null;
   baseBranch: string | null;
   branchName?: string;
   repoOwner?: string | null;
@@ -96,6 +103,7 @@ export function MetadataSection({
   createdAt,
   model,
   reasoningEffort,
+  sandboxProvider,
   baseBranch,
   branchName,
   repoOwner,
@@ -163,6 +171,18 @@ export function MetadataSection({
           <span>
             {formatModelName(model)}
             {reasoningEffort && <span> · {reasoningEffort}</span>}
+          </span>
+        </div>
+      )}
+
+      {/* Sandbox backend — fixed at create, shown so a multi-provider
+       * deployment always says what this session runs on. */}
+      {sandboxProvider && (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <BoxIcon className="w-4 h-4" />
+          <span>
+            Sandbox ·{" "}
+            {SANDBOX_PROVIDER_LABELS[sandboxProvider as SandboxProviderName] ?? sandboxProvider}
           </span>
         </div>
       )}
