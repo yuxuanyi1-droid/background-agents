@@ -12,11 +12,15 @@ import type { SqlDatabase } from "../db/sql-database";
 
 export function createImageBuildLookup(
   db: SqlDatabase,
-  provider: ImageBuildProvider
+  getProvider: () => ImageBuildProvider | null
 ): ImageBuildLookup {
   const store = new ImageBuildStore(db);
   return {
     getLatestReady: async (scope) => {
+      // The session's backend is resolved on access — the graph is built
+      // before init writes the session row that carries the choice.
+      const provider = getProvider();
+      if (!provider) return null;
       // Enablement (and entity existence) is the scope resolver's answer;
       // the store read is a plain row lookup.
       if (!(await resolveScopeEnabled(db, scope))) return null;

@@ -27,7 +27,7 @@ import { sandboxPromptBlockReason } from "@open-inspect/shared/types/sandbox-shu
 import { generateId, hashToken, encryptToken } from "../auth/crypto";
 import { getUserAuth } from "../auth/user/runtime";
 import { resolveSandboxBackendName, type SandboxBackendName } from "../sandbox/provider-name";
-import { createSandboxProviderFromEnv } from "../sandbox/provider-factory";
+import { createSessionScopedSandboxProvider } from "../sandbox/provider-factory";
 import type { SandboxProvider } from "../sandbox/provider";
 import { resolveExecutionBudgetMs } from "../sandbox/execution-budget";
 import { createImageBuildLookup } from "../image-builds/lookup";
@@ -323,8 +323,9 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     resolveSessionRepoId(sessionRow, sessionCoreRepository, sourceControlProvider);
 
   const sandboxDashboardSettings: SandboxDashboardSettings = {
-    sandboxProvider:
-      sessionCoreRepository.getSession()?.sandbox_provider ?? env.SANDBOX_PROVIDER,
+    get sandboxProvider() {
+      return getSandboxBackendName();
+    },
     modalWorkspace: env.MODAL_WORKSPACE,
     modalEnvironment: env.MODAL_ENVIRONMENT,
   };
@@ -427,13 +428,16 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
   const diffsHandler = new SessionDiffsHandler(diffService);
   const eventStream = new SessionEventStream(eventRepository);
 
-  // Tier 5 — the lifecycle manager. The backend is the session's own choice
-  // — fixed at create — falling back to the deployment default for rows old
-  // enough to predate per-session selection (or before init writes the row).
-  const sandboxBackendName = resolveSandboxBackendName(
-    sessionCoreRepository.getSession()?.sandbox_provider ?? env.SANDBOX_PROVIDER
-  );
-  const sandboxProvider = createSandboxProviderFromEnv(env, sandboxBackendName);
+  // The session's own backend — fixed at create — resolved on ACCESS, not at
+  // construction: this graph is built before init writes the session row, so
+  // an eagerly bound provider would freeze the deployment default for the
+  // whole first runtime lifetime. Legacy rows (and the pre-init moment) fall
+  // back to the deployment default.
+  const getSandboxBackendName = () =>
+    resolveSandboxBackendName(
+      sessionCoreRepository.getSession()?.sandbox_provider ?? env.SANDBOX_PROVIDER
+    );
+  const sandboxProvider = createSessionScopedSandboxProvider(env, getSandboxBackendName, log);
   // Tier 6 — the message queue.
   const getExecutionTimeoutMs = () => resolveExecutionTimeoutMs(sessionCoreRepository, env, log);
   const messageFailures = new MessageFailureService(
@@ -465,7 +469,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
   });
   const lifecycleManager = createLifecycleManager({
     provider: sandboxProvider,
-    sandboxBackend: sandboxBackendName,
+    getSandboxBackend: getSandboxBackendName,
     shutdown,
     env,
     db,
@@ -1033,8 +1037,8 @@ interface LifecycleManagerDeps {
   wsManager: SessionWebSocketManager;
   alarmScheduler: RehydratableAlarmScheduler;
   sandboxDashboardSettings: SandboxDashboardSettings;
-  /** The session's chosen backend, already validated by construction. */
-  sandboxBackend: SandboxBackendName;
+  /** The session's chosen backend, resolved on access (the row lands after construction). */
+  getSandboxBackend: () => SandboxBackendName;
 }
 
 /** Create the lifecycle manager with all required adapters. */
@@ -1052,7 +1056,7 @@ function createLifecycleManager(deps: LifecycleManagerDeps): SandboxLifecycleMan
     wsManager,
     alarmScheduler,
     sandboxDashboardSettings,
-    sandboxBackend,
+    getSandboxBackend,
   } = deps;
 
   const lifecycleWsManager = new LifecycleSocketAdapter(wsManager);
@@ -1089,11 +1093,12 @@ function createLifecycleManager(deps: LifecycleManagerDeps): SandboxLifecycleMan
     },
   };
 
-  const sandboxDashboardUrlBuilder =
-    sandboxBackend === "modal" || sandboxBackend === "modal-vm"
-      ? (providerObjectId: string) =>
-          resolveSandboxDashboardUrl(sandboxDashboardSettings, providerObjectId)
-      : undefined;
+  const sandboxDashboardUrlBuilder = (providerObjectId: string): string | null => {
+    // Modal-only, decided per use for the same reason the provider is.
+    const backend = getSandboxBackend();
+    if (backend !== "modal" && backend !== "modal-vm") return null;
+    return resolveSandboxDashboardUrl(sandboxDashboardSettings, providerObjectId);
+  };
 
   // A malformed budget must not take every session down at construction the
   // way a missing provider does; it falls back to the default and says so.
@@ -1141,11 +1146,14 @@ function createLifecycleManager(deps: LifecycleManagerDeps): SandboxLifecycleMan
   // non-default provider needs that provider's prebuilt image, not the
   // deployment default's. Admission stays deployment-level — closing it is
   // the rollback kill switch for every provider at once.
-  const imageBuildLookup: ImageBuildLookup | undefined =
-    imageBuildAdmission.admitted &&
-      (IMAGE_BUILD_PROVIDER_IDS as readonly string[]).includes(sandboxBackend)
-      ? createImageBuildLookup(db, sandboxBackend as (typeof IMAGE_BUILD_PROVIDER_IDS)[number])
-      : undefined;
+  const imageBuildLookup: ImageBuildLookup | undefined = imageBuildAdmission.admitted
+    ? createImageBuildLookup(db, () => {
+        const backend = getSandboxBackend();
+        return (IMAGE_BUILD_PROVIDER_IDS as readonly string[]).includes(backend)
+          ? (backend as (typeof IMAGE_BUILD_PROVIDER_IDS)[number])
+          : null;
+      })
+    : undefined;
 
   return new SandboxLifecycleManager(
     provider,

@@ -226,6 +226,50 @@ const SANDBOX_PROVIDER_LABELS: Record<SandboxBackendName, string> = {
 };
 
 /**
+ * A SandboxProvider resolved per call from the SESSION's own backend choice
+ * (falling back to the deployment default). The session graph is constructed
+ * before init writes the session row, so a provider bound at construction
+ * time would freeze the deployment default for the whole first runtime
+ * lifetime; resolving on access mirrors how harness and other row-fixed
+ * config is read. The concrete provider is memoized per backend name, and a
+ * Proxy keeps optional methods absent on the concrete provider absent on the
+ * wrapper, so capability checks keep their meaning.
+ */
+export function createSessionScopedSandboxProvider(
+  env: Env,
+  getSandboxBackendName: () => SandboxBackendName,
+  log?: { warn: (event: string, fields: Record<string, unknown>) => void }
+): SandboxProvider {
+  let cached: { backend: SandboxBackendName; provider: SandboxProvider } | null = null;
+  const resolve = (): SandboxProvider => {
+    const backend = getSandboxBackendName();
+    if (cached?.backend === backend) return cached.provider;
+    const provider = createSandboxProviderFromEnv(env, backend);
+    if (cached) {
+      log?.warn("sandbox.session_backend_changed", {
+        event: "sandbox.session_backend_changed",
+        from: cached.backend,
+        to: backend,
+      });
+    }
+    cached = { backend, provider };
+    return provider;
+  };
+  return new Proxy({} as SandboxProvider, {
+    get(_target, property, receiver) {
+      const concrete = resolve();
+      const value = Reflect.get(concrete as object, property, receiver);
+      return typeof value === "function"
+        ? (value as (...args: unknown[]) => unknown).bind(concrete)
+        : value;
+    },
+    has(_target, property) {
+      return property in (resolve() as object);
+    },
+  });
+}
+
+/**
  * The providers this deployment's credentials can actually construct — the
  * set the session form offers. Membership is proven by building the provider
  * the same way the session runtime will, so a listed provider can never fail
