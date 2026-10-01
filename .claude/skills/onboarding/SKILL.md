@@ -72,7 +72,7 @@ cd {directory_path}
 git clone git@github.com:ColeMurray/background-agents.git .
 git remote rename origin upstream
 git remote add origin git@github.com:{github_account}/open-inspect-{name}.git
-git push -u origin main
+git push -u origin HEAD
 npm install
 npm run build -w @open-inspect/shared
 ```

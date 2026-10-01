@@ -119,6 +119,12 @@ These run inside a real `workerd` runtime with Miniflare, using the `cloudflareT
   (naming, types, units) is correct — don't blindly propagate it. Fix bad names or units in the same
   change rather than spreading the problem.
 
+### Pushing
+
+Push the branch the working tree is on — never assume a target branch name
+(not even `main`) from documentation or habit. A different target is used only
+when the user names it explicitly.
+
 ### Commit messages
 
 Use conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `test:`. Keep the subject
