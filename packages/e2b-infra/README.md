@@ -40,7 +40,7 @@ export E2B_TEMPLATE_ID=open-inspect-sandbox
 uv run python build-template.py
 ```
 
-Optional: `E2B_TEMPLATE_CPU` (default 2), `E2B_TEMPLATE_MEMORY_MB` (default 4096).
+Optional: `E2B_TEMPLATE_CPU` (default 4), `E2B_TEMPLATE_MEMORY_MB` (default 8192) — the daytona-large class this repo standardizes on.
 
 Rebuild whenever `packages/sandbox-runtime` or this directory changes.
 

@@ -19,14 +19,20 @@ from sandbox_images.native import write_build_result  # noqa: E402
 START_CMD = "sleep infinity"
 READY_CMD = "/opt/openinspect/python/bin/python -I -c 'import sandbox_runtime'"
 
+# The sandbox class every provider defaults to here: Daytona's "daytona-large"
+# (4 vCPU / 8 GiB / 10 GiB disk). E2B sizes at template build time, so these
+# decide the resources of every sandbox spawned from the template.
+DEFAULT_TEMPLATE_CPU = 4
+DEFAULT_TEMPLATE_MEMORY_MB = 8192
+
 
 def main() -> None:
     name = os.environ.get("E2B_TEMPLATE_ID")
     api_key = os.environ.get("E2B_API_KEY")
     if not name or not api_key:
         raise RuntimeError("E2B_TEMPLATE_ID and E2B_API_KEY are required")
-    cpu = int(os.environ.get("E2B_TEMPLATE_CPU", "2"))
-    memory_mb = int(os.environ.get("E2B_TEMPLATE_MEMORY_MB", "4096"))
+    cpu = int(os.environ.get("E2B_TEMPLATE_CPU", str(DEFAULT_TEMPLATE_CPU)))
+    memory_mb = int(os.environ.get("E2B_TEMPLATE_MEMORY_MB", str(DEFAULT_TEMPLATE_MEMORY_MB)))
     if cpu < 1 or memory_mb < 2 or memory_mb % 2:
         raise ValueError("E2B template CPU must be positive and memory a positive even number")
     bundle = pack_bundle(ROOT, "e2b", ROOT / ".cache/sandbox-images")
