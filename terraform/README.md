@@ -233,7 +233,9 @@ SANDBOX_BOOT_TIMEOUT_MS       # Optional; defaults to 1800000, must exceed 24000
 DAYTONA_API_URL
 DAYTONA_API_KEY
 DAYTONA_BASE_SNAPSHOT            # Prefix for the Terraform-managed base snapshot
-DAYTONA_BASE_SNAPSHOT_MEMORY_GIB # Optional; defaults to 2
+DAYTONA_BASE_SNAPSHOT_CPU        # Optional; defaults to 4 (daytona-large class)
+DAYTONA_BASE_SNAPSHOT_MEMORY_GIB # Optional; defaults to 8 (daytona-large class)
+DAYTONA_BASE_SNAPSHOT_DISK_GIB   # Optional; defaults to 10 (daytona-large class)
 DAYTONA_TARGET # Optional
 
 # Vercel Sandboxes (only if SANDBOX_PROVIDER=vercel)

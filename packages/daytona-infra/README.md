@@ -16,8 +16,9 @@ snapshot setup, not runtime operations.
 - `DAYTONA_API_URL`
 - `DAYTONA_TARGET`
 - `DAYTONA_BASE_SNAPSHOT` (required)
-- `DAYTONA_BASE_SNAPSHOT_MEMORY_GIB` (required) — memory reserved by sandboxes created from the
-  snapshot
+- `DAYTONA_BASE_SNAPSHOT_CPU`, `DAYTONA_BASE_SNAPSHOT_MEMORY_GIB`,
+  `DAYTONA_BASE_SNAPSHOT_DISK_GIB` — resources stamped on every built snapshot (sandboxes
+  inherit them). Default to Daytona's own `daytona-large` class: 4 vCPU / 8 GiB / 10 GiB
 
 ## Usage
 

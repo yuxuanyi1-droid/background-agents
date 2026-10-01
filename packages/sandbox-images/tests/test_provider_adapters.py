@@ -125,7 +125,7 @@ def test_daytona_retry_never_recreates_existing_snapshot(
                 api_key="test",
                 api_url="test",
                 target="test",
-                base_snapshot_memory_gib=2,
+                resources=SimpleNamespace(cpu_cores=2, memory_gib=2, disk_gib=10),
             )
         ),
     )
@@ -146,7 +146,12 @@ def test_daytona_retry_never_recreates_existing_snapshot(
     client.snapshot.get.assert_called_once_with(EXPECTED_NAME)
     assert create.call_count == (0 if retained else 1)
     if not retained:
-        create.assert_called_once_with(client, bundle.pack_bundle.return_value, EXPECTED_NAME, 2)
+        create.assert_called_once_with(
+            client,
+            bundle.pack_bundle.return_value,
+            EXPECTED_NAME,
+            SimpleNamespace(cpu_cores=2, memory_gib=2, disk_gib=10),
+        )
     assert not bundle.pack_bundle.return_value.directory.exists()
     assert sandbox_params.call_args.kwargs["env_vars"] is PLAN["runtimeEnv"]
     assert sandbox.process.exec.call_args.args[0].endswith("/app/verify/smoke_test.py verify")
@@ -177,7 +182,7 @@ def test_daytona_image_uses_packed_bundle_plan(monkeypatch, tmp_path):
     image.env.assert_called_once_with({"PACKED_PLAN": "true", "SANDBOX_VERSION": "test-runtime"})
 
 
-def test_daytona_snapshot_uses_configured_memory(monkeypatch, tmp_path):
+def test_daytona_snapshot_uses_configured_resources(monkeypatch, tmp_path):
     image = Mock()
     for method in ("add_local_dir", "run_commands", "env", "workdir"):
         getattr(image, method).return_value = image
@@ -200,9 +205,10 @@ def test_daytona_snapshot_uses_configured_memory(monkeypatch, tmp_path):
     ]
     daytona = SimpleNamespace(snapshot=SimpleNamespace(create=Mock()))
 
-    create_base_snapshot(daytona, bundle.PackedBundle(tmp_path, PLAN), "snapshot-name", 4)
+    spec = SimpleNamespace(cpu_cores=4, memory_gib=8, disk_gib=10)
+    create_base_snapshot(daytona, bundle.PackedBundle(tmp_path, PLAN), "snapshot-name", spec)
 
-    resources.assert_called_once_with(memory=4)
+    resources.assert_called_once_with(cpu=4, memory=8, disk=10)
     snapshot_params.assert_called_once_with(
         name="snapshot-name",
         image=image,
@@ -213,7 +219,7 @@ def test_daytona_snapshot_uses_configured_memory(monkeypatch, tmp_path):
     assert callable(daytona.snapshot.create.call_args.kwargs["on_logs"])
 
 
-@pytest.mark.parametrize("memory_gib", ["", "0", "-1", "1.5"])
+@pytest.mark.parametrize("memory_gib", ["0", "-1", "1.5"])
 def test_daytona_config_rejects_invalid_snapshot_memory(monkeypatch, memory_gib):
     monkeypatch.setenv("DAYTONA_API_KEY", "test")
     monkeypatch.setenv("DAYTONA_BASE_SNAPSHOT", "snapshot")
@@ -226,10 +232,25 @@ def test_daytona_config_rejects_invalid_snapshot_memory(monkeypatch, memory_gib)
         load_config()
 
 
-def test_daytona_config_loads_snapshot_memory(monkeypatch):
+def test_daytona_config_loads_resources_with_daytona_large_defaults(monkeypatch):
     monkeypatch.setenv("DAYTONA_API_KEY", "test")
     monkeypatch.setenv("DAYTONA_BASE_SNAPSHOT", "snapshot")
-    monkeypatch.setenv("DAYTONA_BASE_SNAPSHOT_MEMORY_GIB", "4")
+    monkeypatch.delenv("DAYTONA_BASE_SNAPSHOT_CPU", raising=False)
+    monkeypatch.delenv("DAYTONA_BASE_SNAPSHOT_MEMORY_GIB", raising=False)
+    monkeypatch.delenv("DAYTONA_BASE_SNAPSHOT_DISK_GIB", raising=False)
     load_config = runpy.run_path(str(ROOT / "packages/daytona-infra/src/config.py"))["load_config"]
 
-    assert load_config().base_snapshot_memory_gib == 4
+    resources = load_config().resources
+    assert (resources.cpu_cores, resources.memory_gib, resources.disk_gib) == (4, 8, 10)
+
+
+def test_daytona_config_loads_overridden_resources(monkeypatch):
+    monkeypatch.setenv("DAYTONA_API_KEY", "test")
+    monkeypatch.setenv("DAYTONA_BASE_SNAPSHOT", "snapshot")
+    monkeypatch.setenv("DAYTONA_BASE_SNAPSHOT_CPU", "2")
+    monkeypatch.setenv("DAYTONA_BASE_SNAPSHOT_MEMORY_GIB", "4")
+    monkeypatch.setenv("DAYTONA_BASE_SNAPSHOT_DISK_GIB", "6")
+    load_config = runpy.run_path(str(ROOT / "packages/daytona-infra/src/config.py"))["load_config"]
+
+    resources = load_config().resources
+    assert (resources.cpu_cores, resources.memory_gib, resources.disk_gib) == (2, 4, 6)

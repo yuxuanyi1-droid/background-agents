@@ -9,6 +9,8 @@ from daytona import CreateSnapshotParams, Daytona, Image, Resources
 if TYPE_CHECKING:
     from sandbox_images.bundle import PackedBundle
 
+    from .config import BaseSnapshotResources
+
 
 def build_base_image(bundle: PackedBundle) -> Image:
     plan = bundle.plan
@@ -22,13 +24,20 @@ def build_base_image(bundle: PackedBundle) -> Image:
 
 
 def create_base_snapshot(
-    daytona: Daytona, bundle: PackedBundle, snapshot_name: str, memory_gib: int
+    daytona: Daytona,
+    bundle: PackedBundle,
+    snapshot_name: str,
+    resources: BaseSnapshotResources,
 ) -> None:
     daytona.snapshot.create(
         CreateSnapshotParams(
             name=snapshot_name,
             image=build_base_image(bundle),
-            resources=Resources(memory=memory_gib),
+            resources=Resources(
+                cpu=resources.cpu_cores,
+                memory=resources.memory_gib,
+                disk=resources.disk_gib,
+            ),
             entrypoint=["python", "-m", "sandbox_runtime.entrypoint"],
         ),
         on_logs=lambda chunk: print(chunk, end="\n"),
