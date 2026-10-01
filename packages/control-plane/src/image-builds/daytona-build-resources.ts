@@ -99,6 +99,8 @@ const TERMINAL_SANDBOX_STATES = new Set<DaytonaSandboxState>([
 
 export interface DaytonaImageBuildResourcesConfig {
   scmProvider: SourceControlProviderName;
+  /** Egress proxy for build sandboxes (see the runtime provider's outboundProxyUrl). */
+  outboundProxyUrl?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +140,12 @@ export class DaytonaImageBuildResources {
       const params: DaytonaCreateSandboxParams = {
         name: sourceName,
         snapshot: this.client.requireBaseSnapshot(),
+        // Build sandboxes owe the same egress treatment as session sandboxes:
+        // their setup and completion callback reach the control plane through
+        // the proxy Daytona's SNI allow list would otherwise block.
+        ...(this.providerConfig.outboundProxyUrl
+          ? { outboundProxyUrl: this.providerConfig.outboundProxyUrl }
+          : {}),
         // The only two values a capture may inherit: neither is secret, and
         // the launcher clears the dormant marker before the build composes.
         env: { [DEFERRED_START_ENV_VAR]: "true", PYTHONUNBUFFERED: "1" },

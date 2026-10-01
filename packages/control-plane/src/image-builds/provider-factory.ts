@@ -55,7 +55,10 @@ class EnvImageBuildAdapterFactory implements ImageBuildAdapterFactory {
             createDaytonaRestClientFromEnv(this.env, {
               requireBaseSnapshot: operation === "start",
             }),
-            { scmProvider: resolveScmProviderFromEnv(this.env.SCM_PROVIDER) }
+            {
+              scmProvider: resolveScmProviderFromEnv(this.env.SCM_PROVIDER),
+              outboundProxyUrl: this.env.DAYTONA_OUTBOUND_PROXY_URL || undefined,
+            }
           )
         );
     }
