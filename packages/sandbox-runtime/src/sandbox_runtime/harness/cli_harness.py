@@ -55,6 +55,10 @@ KILL_GRACE_SECONDS = 5.0
 # model then thinking — so this cap only exists to turn a non-converging
 # vendor into a failed turn instead of a loop.
 SETUP_REQUEST_LIMIT = 4
+# asyncio's subprocess streams cap a readline at 64 KiB by default; a protocol
+# frame larger than that raises out of the reader and used to be reported as a
+# server death ("exited mid-turn (code None)") while the process was alive.
+PROTOCOL_STREAM_LIMIT_BYTES = 16 * 1024 * 1024
 
 
 @dataclass
@@ -406,6 +410,7 @@ class _ResidentServer:
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._stderr_tail = ""
+        self._reader_error: str | None = None
         self._rpc_id = 0
 
     @property
@@ -416,6 +421,11 @@ class _ResidentServer:
     def stderr_tail(self) -> str:
         """The last stderr lines, for failure diagnostics after a death."""
         return self._stderr_tail
+
+    @property
+    def reader_error(self) -> str | None:
+        """Why the stdout reader stopped without a server exit, if it did."""
+        return self._reader_error
 
     async def start(
         self,
@@ -449,8 +459,10 @@ class _ResidentServer:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
+            limit=PROTOCOL_STREAM_LIMIT_BYTES,
         )
         assert self._process.stdout is not None and self._process.stderr is not None
+        self._reader_error = None
         self._reader_task = asyncio.create_task(self._read_stdout(self._process.stdout))
         self._stderr_task = asyncio.create_task(self._drain_stderr(self._process.stderr))
         # A fresh process knows no conversation: the vendor must resume any
@@ -462,7 +474,14 @@ class _ResidentServer:
     async def _read_stdout(self, stream: asyncio.StreamReader) -> None:
         try:
             while True:
-                line = await stream.readline()
+                try:
+                    line = await stream.readline()
+                except ValueError as error:
+                    # A frame larger than the stream limit. The server is still
+                    # alive; record why the reader stopped so the turn failure
+                    # names the real cause instead of a phantom exit.
+                    self._reader_error = f"{type(error).__name__}: {error}"
+                    return
                 if not line:
                     return
                 text = line.decode("utf-8", errors="replace").strip()
@@ -500,7 +519,11 @@ class _ResidentServer:
     async def _drain_stderr(self, stream: asyncio.StreamReader) -> None:
         tail: deque[str] = deque(maxlen=16)
         while True:
-            line = await stream.readline()
+            try:
+                line = await stream.readline()
+            except ValueError:
+                # An oversize stderr line; keep the tail collected so far.
+                return
             if not line:
                 return
             tail.append(line.decode("utf-8", errors="replace").rstrip())
@@ -689,6 +712,7 @@ class CliHarness:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
+                limit=PROTOCOL_STREAM_LIMIT_BYTES,
             )
         except FileNotFoundError:
             return TurnOutcome.failed(f"The {self.vendor.binary} CLI is not installed.")
@@ -869,7 +893,14 @@ class CliHarness:
                     # pi 0.87.1) must not fail a complete turn.
                     return
                 code, tail = await server.exit_details()
-                detail = f"The {self.id.value} protocol server exited mid-turn (code {code})."
+                reader_error = server.reader_error
+                if reader_error:
+                    detail = (
+                        f"The {self.id.value} protocol server stream failed mid-turn "
+                        f"({reader_error}); the server process was still running."
+                    )
+                else:
+                    detail = f"The {self.id.value} protocol server exited mid-turn (code {code})."
                 if tail:
                     detail += f" Stderr tail: {tail[-STDERR_TAIL_CHARS:]}"
                 raise CliServerDied(detail)

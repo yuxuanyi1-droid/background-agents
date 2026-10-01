@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from sandbox_runtime.harness import cli_harness
 from sandbox_runtime.harness.base import (
     HarnessId,
     HarnessPrompt,
@@ -437,6 +438,48 @@ async def test_resident_server_death_fails_fast_with_exit_details(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_resident_server_survives_an_oversize_frame(tmp_path: Path) -> None:
+    # asyncio's default 64 KiB readline cap used to turn one large protocol
+    # frame into a phantom "server exited mid-turn (code None)".
+    script = (
+        _SERVER_HEAD + "    elif kind == 'prompt':\n"
+        "        send({'id': message['id'], 'result': {'accepted': True}})\n"
+        "        send({'type': 'delta', 'text': 'x' * (200 * 1024)})\n"
+        "        send({'type': 'done'})\n"
+    )
+    harness = _harness(_ResidentScriptVendor(script), tmp_path)
+    await harness.create_session()
+    outcome, _ = await _run(harness)
+    assert outcome.success, outcome.error
+
+
+@pytest.mark.asyncio
+async def test_resident_reader_overrun_names_the_stream_not_a_phantom_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # If a frame ever does exceed the stream limit, the failure must say the
+    # reader stopped while the server was still running — not claim an exit.
+    script = (
+        _SERVER_HEAD + "    elif kind == 'prompt':\n"
+        "        send({'id': message['id'], 'result': {'accepted': True}})\n"
+        "        send({'type': 'delta', 'text': 'y' * 2048})\n"
+        "        import time\n"
+        "        time.sleep(30)\n"
+    )
+    monkeypatch.setattr(cli_harness, "PROTOCOL_STREAM_LIMIT_BYTES", 1024)
+    harness = _harness(_ResidentScriptVendor(script), tmp_path)
+    await harness.create_session()
+    outcome, _ = await _run(harness)
+    assert not outcome.success
+    error = outcome.error or ""
+    assert "stream failed mid-turn" in error
+    assert "still running" in error
+    assert "exited mid-turn" not in error
+    # The wedged server must not survive into the next turn.
+    assert harness._server is None
+
+
+@pytest.mark.asyncio
 async def test_resident_settles_after_the_final_message_grace(tmp_path: Path) -> None:
     # Pi semantics: a terminal assistant message is authoritative, so a
     # settle event that never arrives costs a bounded grace, not the whole
@@ -522,7 +565,6 @@ async def test_resident_start_sweeps_orphaned_servers(tmp_path: Path) -> None:
 async def test_resident_exit_after_final_answer_settles_successfully(tmp_path: Path) -> None:
     # pi 0.87.1 delivers the final message and exits immediately; a complete
     # turn must not be failed by the server's own death.
-    import subprocess as sp
 
     script = (
         _SERVER_HEAD + "    elif kind == 'prompt':\n"
