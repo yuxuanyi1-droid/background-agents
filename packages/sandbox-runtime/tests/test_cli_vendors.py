@@ -140,6 +140,27 @@ class TestCodexAppServer:
         # no further events — the harness emits whatever rides it either way.
         assert isinstance(settled.value.events, list)
 
+    def test_compaction_item_emits_context_compacted(self) -> None:
+        vendor = CodexVendor()
+        state = _state()
+        assert (
+            vendor.parse_server_message(
+                {
+                    "method": "item/started",
+                    "params": {"item": {"id": "i3", "type": "contextCompaction"}},
+                },
+                state,
+            )
+            == []
+        )
+        assert vendor.parse_server_message(
+            {
+                "method": "item/completed",
+                "params": {"item": {"id": "i3", "type": "contextCompaction"}},
+            },
+            state,
+        ) == [{"type": "context_compacted", "messageId": "m1"}]
+
     def test_turn_failed_settles_with_the_error_event(self) -> None:
         vendor = CodexVendor()
         state = _state()
@@ -443,6 +464,33 @@ class TestZcodeAppServer:
         assert settled.value.events[-1]["type"] == "token"
         assert settled.value.events[-1]["content"] == "Hello"
 
+    def test_compaction_part_emits_context_compacted_once(self) -> None:
+        vendor = ZcodeVendor()
+        state = _state()
+        boundary = {
+            "messageId": "msg-9",
+            "partId": "p-9",
+            "part": {"type": "compaction", "auto": True},
+        }
+        assert (
+            vendor.parse_server_message(self._session_event("part.started", boundary), state) == []
+        )
+        assert vendor.parse_server_message(
+            self._session_event("part.upserted", boundary), state
+        ) == [{"type": "context_compacted", "messageId": "m1"}]
+        # Timeline separator parts are display-only; the boundary already
+        # reported itself.
+        assert (
+            vendor.parse_server_message(
+                self._session_event(
+                    "part.upserted",
+                    {"messageId": "msg-9", "partId": "p-10", "part": {"type": "timeline"}},
+                ),
+                state,
+            )
+            == []
+        )
+
     def test_turn_failed_settles_with_the_error_event(self) -> None:
         vendor = ZcodeVendor()
         state = _state()
@@ -614,6 +662,21 @@ class TestCodex:
         )
         assert state.completed
         assert state.tokens == {"input_tokens": 3, "output_tokens": 5}
+
+    def test_compaction_item_emits_context_compacted(self) -> None:
+        vendor = CodexVendor()
+        state = _state()
+        assert (
+            vendor.parse_record(
+                {"type": "item.started", "item": {"id": "i3", "type": "context_compaction"}},
+                state,
+            )
+            == []
+        )
+        assert vendor.parse_record(
+            {"type": "item.completed", "item": {"id": "i3", "type": "context_compaction"}},
+            state,
+        ) == [{"type": "context_compacted", "messageId": "m1"}]
 
     def test_turn_failed_is_an_error(self) -> None:
         vendor = CodexVendor()

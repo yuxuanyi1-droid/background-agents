@@ -113,6 +113,8 @@ _CODEX_ITEM_TYPES = {
     "fileChange": "file_change",
     "mcpToolCall": "mcp_tool_call",
     "error": "error",
+    # Emitted when Codex compacts the thread's history (auto or thread/compact).
+    "contextCompaction": "context_compaction",
 }
 
 
@@ -351,6 +353,9 @@ class CodexVendor:
                 message = _error_text(item)
                 if message:
                     events.append({"type": "warning", "scope": "provider", "message": message})
+            if kind == "item.completed" and item.get("type") == "context_compaction":
+                # Completed only: started would double every boundary.
+                events.append({"type": "context_compacted", "messageId": state.message_id})
             return events
         if kind == "turn.completed":
             # A failed turn rides turn/completed with turn.error and no items;
@@ -856,10 +861,18 @@ class ZcodeVendor:
         if not isinstance(event, dict):
             return []
         kind = event.get("type")
-        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        raw_payload = event.get("payload")
+        payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
         if kind == "part.delta":
             if payload.get("field") in (None, "text") and isinstance(payload.get("delta"), str):
                 return append_text_events(state, payload["delta"])
+            return []
+        if kind == "part.upserted":
+            # The compact boundary rides the message stream as a "compaction"
+            # part; upserted only, so a started+upserted pair emits once.
+            part = payload.get("part")
+            if isinstance(part, dict) and part.get("type") == "compaction":
+                return [{"type": "context_compacted", "messageId": state.message_id}]
             return []
         if kind == "tool.updated":
             return self._tool_updated_events(payload, state)
