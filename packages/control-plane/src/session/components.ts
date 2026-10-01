@@ -32,6 +32,7 @@ import type { SandboxProvider } from "../sandbox/provider";
 import { resolveExecutionBudgetMs } from "../sandbox/execution-budget";
 import { createImageBuildLookup } from "../image-builds/lookup";
 import { resolveImageBuildAdmission } from "../image-builds/provider-policy";
+import { IMAGE_BUILD_PROVIDER_IDS } from "@open-inspect/shared/types/image-builds";
 import { createLogger, parseLogLevel } from "../logger";
 import type { Logger } from "../logger";
 // The composition root binds lifecycle ports to their implementation.
@@ -1136,9 +1137,14 @@ function createLifecycleManager(deps: LifecycleManagerDeps): SandboxLifecycleMan
   // is how a rollback stops handing sessions a prebuilt image, without
   // touching any scope's own toggle.
   const imageBuildAdmission = resolveImageBuildAdmission(env);
+  // The lookup follows the session's own backend: a session dispatched to a
+  // non-default provider needs that provider's prebuilt image, not the
+  // deployment default's. Admission stays deployment-level — closing it is
+  // the rollback kill switch for every provider at once.
   const imageBuildLookup: ImageBuildLookup | undefined =
-    imageBuildAdmission.admitted && imageBuildAdmission.provider
-      ? createImageBuildLookup(db, imageBuildAdmission.provider)
+    imageBuildAdmission.admitted &&
+      (IMAGE_BUILD_PROVIDER_IDS as readonly string[]).includes(sandboxBackend)
+      ? createImageBuildLookup(db, sandboxBackend as (typeof IMAGE_BUILD_PROVIDER_IDS)[number])
       : undefined;
 
   return new SandboxLifecycleManager(

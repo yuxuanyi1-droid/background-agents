@@ -331,16 +331,17 @@ export class SandboxShutdownCoordinator {
       this.deps.session.getSession()?.sandbox_settings ?? null
     );
     const buffer = settings.finalSnapshotBufferMs ?? DEFAULT_FINAL_SNAPSHOT_BUFFER_MS;
+    const drainAtMs = lifetime.expiresAtMs - buffer;
     const next: ShutdownRecord = {
       ...state,
       lifetimeKind: "finite",
       lifetimeSource: lifetime.source,
       expiresAtMs: lifetime.expiresAtMs,
-      drainAtMs: lifetime.expiresAtMs - buffer,
+      drainAtMs,
     };
     this.publish(next);
-    if (this.now() >= next.drainAtMs) await this.requestShutdown("sandbox_lifetime_expiring");
-    else await this.deps.alarm.schedule(next.drainAtMs);
+    if (this.now() >= drainAtMs) await this.requestShutdown("sandbox_lifetime_expiring");
+    else await this.deps.alarm.schedule(drainAtMs);
     this.notifyLifecycleChange();
   }
 

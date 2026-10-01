@@ -27,6 +27,8 @@ import {
   type ResolvedImageBuildTarget,
 } from "./planner";
 import { resolveImageBuildAdmission, resolveImageBuildProvider } from "./provider-policy";
+import { IMAGE_BUILD_PROVIDER_IDS } from "@open-inspect/shared/types/image-builds";
+import { createSandboxProviderFromEnv } from "../sandbox/provider-factory";
 import { createImageBuildAdapterFactory, type ImageBuildAdapterFactory } from "./provider-factory";
 import type {
   ImageBuildAdapter,
@@ -64,6 +66,14 @@ export type ImageBuildProviderDeps = {
 } | null;
 
 /**
+ * One deps entry per configured provider: a deployment with several sandbox
+ * backends keeps a ready image for each, so a session on any of them boots
+ * without the repo setup cost. The single-deps form (one entry, or null when
+ * unconfigured) is the same object at position zero.
+ */
+export type ImageBuildProviderDepsSet = readonly NonNullable<ImageBuildProviderDeps>[];
+
+/**
  * Application service for the image-build lifecycle.
  *
  * Sequences planning, provider adapter calls, callback authorization, store
@@ -79,8 +89,13 @@ export class ImageBuildWorkflow {
     private readonly env: Env,
     private readonly store: ImageBuildStore,
     private readonly adapterFactory: ImageBuildAdapterFactory,
-    private readonly providerDeps: ImageBuildProviderDeps
-  ) {}
+    providerDeps: ImageBuildProviderDeps | ImageBuildProviderDepsSet
+  ) {
+    this.providerDepsList =
+      providerDeps === null ? [] : Array.isArray(providerDeps) ? providerDeps : [providerDeps];
+  }
+
+  private readonly providerDepsList: ImageBuildProviderDepsSet;
 
   /**
    * Trigger a build for a scope. All trigger sources — the cron pass,
@@ -162,9 +177,29 @@ export class ImageBuildWorkflow {
     ctx: ImageBuildWorkflowContext,
     options: { onlyIfStale: boolean; target?: ResolvedImageBuildTarget }
   ): Promise<TriggerImageBuildResult> {
-    if (!this.providerDeps) {
+    // One build per configured provider: a multi-provider deployment keeps a
+    // ready image for each backend, and the per-(scope, provider)
+    // concurrency-1 guard keeps parallel triggers from doubling up. The
+    // first definitive outcome wins for the caller; "already_building" from
+    // every provider means exactly that.
+    if (this.providerDepsList.length === 0) {
       throw new ImageBuildWorkflowUnavailableError("Image build provider is not configured");
     }
+    let lastResult: TriggerImageBuildResult | null = null;
+    for (const deps of this.providerDepsList) {
+      const result = await this.triggerForProvider(deps, scope, ctx, options);
+      if (result.type !== "already_building") return result;
+      lastResult = result;
+    }
+    return lastResult!;
+  }
+
+  private async triggerForProvider(
+    providerDeps: NonNullable<ImageBuildProviderDeps>,
+    scope: ImageBuildScope,
+    ctx: ImageBuildWorkflowContext,
+    options: { onlyIfStale: boolean; target?: ResolvedImageBuildTarget }
+  ): Promise<TriggerImageBuildResult> {
     if (!this.env.WORKER_URL) {
       throw new ImageBuildWorkflowUnavailableError("WORKER_URL not configured");
     }
@@ -177,7 +212,7 @@ export class ImageBuildWorkflow {
         admission.reason
       );
     }
-    const { provider, planner } = this.providerDeps;
+    const { provider, planner } = providerDeps;
 
     // Validate provider configuration before any database work. This keeps a
     // bad deployment from accumulating failed rows and preserves the most
@@ -523,13 +558,40 @@ export class ImageBuildWorkflow {
 }
 
 export function createImageBuildWorkflowFromEnv(env: Env, db: SqlDatabase): ImageBuildWorkflow {
-  const provider = resolveImageBuildProvider(env.SANDBOX_PROVIDER);
   return new ImageBuildWorkflow(
     env,
     new ImageBuildStore(db),
     createImageBuildAdapterFactory(env),
-    provider ? { provider, planner: new ImageBuildPlanner(env, db) } : null
+    imageBuildProviderDepsFromEnv(env, db)
   );
+}
+
+/**
+ * One planner-equipped deps entry per provider whose credentials this
+ * deployment can construct (the default first), restricted to providers with
+ * image-build support. Providers whose construction throws — half-configured
+ * credentials — are skipped: they cannot run builds and must not block the
+ * rest. modal-vm rides along as modal's infra variant and stays out.
+ */
+export function imageBuildProviderDepsFromEnv(
+  env: Env,
+  db: SqlDatabase
+): ImageBuildProviderDepsSet {
+  const planner = new ImageBuildPlanner(env, db);
+  const defaultProvider = resolveImageBuildProvider(env.SANDBOX_PROVIDER);
+  const seen = new Set<string>();
+  const deps: NonNullable<ImageBuildProviderDeps>[] = [];
+  for (const option of [defaultProvider, ...IMAGE_BUILD_PROVIDER_IDS]) {
+    if (!option || option === "modal-vm" || seen.has(option)) continue;
+    seen.add(option);
+    try {
+      createSandboxProviderFromEnv(env, option);
+    } catch {
+      continue;
+    }
+    deps.push({ provider: option, planner });
+  }
+  return deps;
 }
 
 /**

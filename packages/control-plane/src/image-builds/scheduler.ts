@@ -11,7 +11,8 @@ import { ImageBuildReaper } from "./reaper";
 import { listEnabledScopes, resolveScopeTarget } from "./scope";
 import { ImageBuildSessionCleanup } from "./session-cleanup";
 import { createImageBuildWorkflowFromEnv, type ImageBuildWorkflow } from "./workflow";
-import { resolveImageBuildAdmission, resolveImageBuildProvider } from "./provider-policy";
+import { resolveImageBuildAdmission } from "./provider-policy";
+import { imageBuildProviderDepsFromEnv } from "./workflow";
 import { runMaintenanceTasks } from "./concurrency";
 import { repositoryIdentityKey } from "./provenance";
 import type { Env } from "../types";
@@ -309,10 +310,10 @@ export async function runImageBuildScheduler(
   db: SqlDatabase,
   correlation: CorrelationContext
 ): Promise<ImageBuildSchedulerStats> {
-  const provider = resolveImageBuildProvider(env.SANDBOX_PROVIDER);
   const store = new ImageBuildStore(db);
+  const depsSet = imageBuildProviderDepsFromEnv(env, db);
   let sourceControl: SourceControlProvider | null = null;
-  if (provider) {
+  if (depsSet.length > 0) {
     try {
       sourceControl = createSourceControlProviderFromEnv(env);
     } catch (error) {
@@ -321,13 +322,43 @@ export async function runImageBuildScheduler(
       });
     }
   }
-  return new ImageBuildScheduler(
-    env,
-    db,
-    provider,
-    store,
-    createImageBuildWorkflowFromEnv(env, db),
-    createImageBuildAdapterFactory(env),
-    sourceControl
-  ).run(correlation);
+  // One reconciliation pass per configured provider: the rebuild policy reads
+  // that provider's own rows, so a fresh e2b image must not hide a stale
+  // modal one (the workflow trigger itself fans out, but nothing would ask).
+  let aggregate: ImageBuildSchedulerStats | null = null;
+  for (const deps of depsSet) {
+    const stats = await new ImageBuildScheduler(
+      env,
+      db,
+      deps.provider,
+      store,
+      createImageBuildWorkflowFromEnv(env, db),
+      createImageBuildAdapterFactory(env),
+      sourceControl
+    ).run(correlation);
+    aggregate = aggregate ? mergeSchedulerStats(aggregate, stats) : stats;
+  }
+  if (aggregate) return aggregate;
+  // No configured provider: a tick that still reports admission state.
+  const empty = {} as ImageBuildSchedulerStats;
+  for (const key of Object.keys(empty) as (keyof ImageBuildSchedulerStats)[]) {
+    (empty[key] as unknown) =
+      key === "admissionOpen" ? resolveImageBuildAdmission(env).admitted : 0;
+  }
+  return empty;
+}
+
+function mergeSchedulerStats(
+  left: ImageBuildSchedulerStats,
+  right: ImageBuildSchedulerStats
+): ImageBuildSchedulerStats {
+  const merged = { ...left } as ImageBuildSchedulerStats;
+  for (const key of Object.keys(right) as (keyof ImageBuildSchedulerStats)[]) {
+    if (key === "admissionOpen") continue;
+    const value = right[key];
+    if (typeof value === "number") {
+      (merged[key] as number) = ((merged[key] as number) ?? 0) + value;
+    }
+  }
+  return merged;
 }
