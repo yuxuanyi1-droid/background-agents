@@ -76,6 +76,12 @@ export interface DaytonaProviderConfig {
   sandboxAccessPasswordSecret: string;
   /** Standard-port control-plane origin for Daytona sandboxes (see createSandbox). */
   controlPlaneUrlOverride?: string;
+  /**
+   * Egress proxy handed to Daytona (outboundProxyUrl): the sandbox's
+   * HTTP(S) clients — including the runtime bridge, whose websockets client
+   * honours HTTP(S)_PROXY — reach otherwise-blocked origins through it.
+   */
+  outboundProxyUrl?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +140,9 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       };
       if (this.client.config.target) {
         params.target = this.client.config.target;
+      }
+      if (this.providerConfig.outboundProxyUrl) {
+        params.outboundProxyUrl = this.providerConfig.outboundProxyUrl;
       }
 
       const sandbox = await this.client.createSandbox(params);

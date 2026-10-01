@@ -214,6 +214,12 @@ export interface DaytonaCreateSandboxParams {
   ttlMinutes?: number;
   public?: boolean;
   target?: string;
+  /**
+   * HTTP(S) proxy the sandbox's egress flows through (Daytona sets
+   * HTTP_PROXY/HTTPS_PROXY from it). For deployments whose control plane
+   * rides a destination Daytona's SNI allow list blocks.
+   */
+  outboundProxyUrl?: string;
 }
 
 /** One sandbox's toolbox endpoint: its proxy base URL and its own id. */
