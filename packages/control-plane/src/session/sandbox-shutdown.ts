@@ -78,11 +78,17 @@ interface ShutdownDependencies {
   reconcileStatusFromMessages(): Promise<void>;
   retireAccess(): void;
   /**
-   * Deployment knob (`SANDBOX_AUTO_CONTINUE`): on a lifetime-expiry drain of
-   * a persistent-resume provider, requeue the interrupted prompt and resume
+   * Deployment default (`SANDBOX_AUTO_CONTINUE`): on a lifetime-expiry drain
+   * of a persistent-resume provider, requeue the interrupted prompt and resume
    * the paused sandbox automatically instead of holding for the user.
    */
   autoContinueOnLifetimeExpiry?: boolean;
+  /**
+   * Per-session override, resolved at drain time because the graph can be
+   * constructed before the session row (and its sandbox settings) exists.
+   * Falls back to the deployment boolean when unset.
+   */
+  resolveAutoContinueOnLifetimeExpiry?: () => boolean | undefined;
   now?: () => number;
   log?: Logger;
 }
@@ -977,7 +983,10 @@ export class SandboxShutdownCoordinator {
     state: ShutdownRecord | null
   ): boolean {
     if (emergency || reason !== "sandbox_lifetime_expiring") return false;
-    if (this.deps.autoContinueOnLifetimeExpiry !== true) return false;
+    const enabled =
+      this.deps.resolveAutoContinueOnLifetimeExpiry?.() ??
+      (this.deps.autoContinueOnLifetimeExpiry === true);
+    if (!enabled) return false;
     const capabilities = this.deps.provider.capabilities;
     if (!capabilities.supportsPersistentResume || capabilities.supportsSnapshots) return false;
     return lifetimeAutoContinueCount(state, messageId) < MAX_LIFETIME_AUTO_CONTINUATIONS;

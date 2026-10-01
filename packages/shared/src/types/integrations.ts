@@ -275,6 +275,12 @@ export const sandboxSettingsSchema = z.strictObject({
   buildTimeoutSeconds: z.number().optional(),
   /** Maximum OpenCode-reported session cost in USD. */
   maxSessionCostUsd: z.number().finite().positive().optional(),
+  /**
+   * Resume a lifetime-expired sandbox and re-dispatch the interrupted prompt
+   * instead of holding it for the user. Only providers that pause with memory
+   * and resume in place (E2B) honor it; others drop it at session init.
+   */
+  autoContinueOnLifetimeExpiry: z.boolean().optional(),
 });
 
 export type SandboxSettings = z.infer<typeof sandboxSettingsSchema>;
@@ -303,15 +309,15 @@ export const SANDBOX_PROVIDER_LABELS: Record<SandboxProviderName, string> = {
 
 export const sandboxProviderNameSchema = z.enum(SANDBOX_PROVIDER_NAMES);
 
-const DEFAULT_SANDBOX_SETTING_CAPABILITIES = { resources: true, timeout: true };
+const DEFAULT_SANDBOX_SETTING_CAPABILITIES = { resources: true, timeout: true, autoContinue: false };
 const SANDBOX_SETTING_CAPABILITIES = {
   modal: DEFAULT_SANDBOX_SETTING_CAPABILITIES,
   "modal-vm": DEFAULT_SANDBOX_SETTING_CAPABILITIES,
-  daytona: { resources: false, timeout: false },
+  daytona: { resources: false, timeout: false, autoContinue: false },
   vercel: DEFAULT_SANDBOX_SETTING_CAPABILITIES,
-  opencomputer: { resources: false, timeout: true },
-  e2b: { resources: false, timeout: true },
-} satisfies Record<SandboxProviderName, { resources: boolean; timeout: boolean }>;
+  opencomputer: { resources: false, timeout: true, autoContinue: false },
+  e2b: { resources: false, timeout: true, autoContinue: true },
+} satisfies Record<SandboxProviderName, { resources: boolean; timeout: boolean; autoContinue: boolean }>;
 
 export function isSandboxProviderName(provider: string): provider is SandboxProviderName {
   return (SANDBOX_PROVIDER_NAMES as readonly string[]).includes(provider);
@@ -321,6 +327,7 @@ export function isSandboxProviderName(provider: string): provider is SandboxProv
 export function sandboxSettingCapabilities(provider: string): {
   resources: boolean;
   timeout: boolean;
+  autoContinue: boolean;
 } {
   const normalized = provider.trim().toLowerCase();
   return isSandboxProviderName(normalized)
@@ -338,7 +345,20 @@ export function supportsConfigurableSandboxTimeout(provider: string): boolean {
   return sandboxSettingCapabilities(provider).timeout;
 }
 
-export type ProviderSpecificSandboxSetting = "cpuCores" | "memoryMib" | "sandboxTimeoutMs";
+/**
+ * Whether the provider can honor `autoContinueOnLifetimeExpiry`: it must pause
+ * with memory and resume in place. E2B today; snapshot providers (Modal)
+ * restore interrupted prompts into a fresh sandbox instead.
+ */
+export function supportsSandboxAutoContinue(provider: string): boolean {
+  return sandboxSettingCapabilities(provider).autoContinue;
+}
+
+export type ProviderSpecificSandboxSetting =
+  | "cpuCores"
+  | "memoryMib"
+  | "sandboxTimeoutMs"
+  | "autoContinueOnLifetimeExpiry";
 
 export function unsupportedSandboxSettings(
   settings: SandboxSettings,
@@ -351,6 +371,12 @@ export function unsupportedSandboxSettings(
   }
   if (!supportsConfigurableSandboxTimeout(provider) && settings.sandboxTimeoutMs !== undefined) {
     unsupported.push("sandboxTimeoutMs");
+  }
+  if (
+    !supportsSandboxAutoContinue(provider) &&
+    settings.autoContinueOnLifetimeExpiry !== undefined
+  ) {
+    unsupported.push("autoContinueOnLifetimeExpiry");
   }
   return unsupported;
 }

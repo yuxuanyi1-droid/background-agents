@@ -31,6 +31,15 @@ describe("parsePersistedSandboxSettings", () => {
     ).toEqual({ terminalEnabled: true });
   });
 
+  it("round-trips the lifetime auto-continue toggle and rejects non-booleans", () => {
+    expect(
+      parsePersistedSandboxSettings('{"autoContinueOnLifetimeExpiry":true}')
+    ).toEqual({ autoContinueOnLifetimeExpiry: true });
+    expect(() =>
+      normalizeSandboxSettings({ autoContinueOnLifetimeExpiry: "yes" })
+    ).toThrow(SandboxSettingsValidationError);
+  });
+
   it.each(["", "not-json"])("throws when persisted blob %j is not valid JSON", (settingsJson) => {
     expect(() => parsePersistedSandboxSettings(settingsJson)).toThrow(SyntaxError);
   });

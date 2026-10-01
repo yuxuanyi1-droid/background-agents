@@ -13,6 +13,7 @@ import {
   mcpServerTypeSchema,
   normalizeRoutingRules,
   omitUnsupportedSandboxSettings,
+  supportsSandboxAutoContinue,
   resolveBuildTimeoutSeconds,
   supportsConfigurableSandboxResources,
   supportsConfigurableSandboxTimeout,
@@ -41,6 +42,13 @@ describe("sandbox provider settings capabilities", () => {
     expect(supportsConfigurableSandboxTimeout("modal")).toBe(true);
   });
 
+  it("allows lifetime auto-continue only for E2B", () => {
+    expect(supportsSandboxAutoContinue("e2b")).toBe(true);
+    for (const provider of ["modal", "modal-vm", "daytona", "vercel", "opencomputer"]) {
+      expect(supportsSandboxAutoContinue(provider)).toBe(false);
+    }
+  });
+
   it("uses the explicit permissive fallback for unvalidated provider names", () => {
     expect(supportsConfigurableSandboxResources("test-provider")).toBe(true);
     expect(supportsConfigurableSandboxTimeout("test-provider")).toBe(true);
@@ -59,6 +67,14 @@ describe("sandbox provider settings capabilities", () => {
         "daytona"
       )
     ).toEqual({ buildTimeoutSeconds: 2400, terminalEnabled: true });
+  });
+
+  it("keeps lifetime auto-continue on E2B and drops it everywhere else", () => {
+    const settings = { autoContinueOnLifetimeExpiry: true, terminalEnabled: true };
+    expect(omitUnsupportedSandboxSettings(settings, "e2b")).toEqual(settings);
+    expect(omitUnsupportedSandboxSettings(settings, "modal")).toEqual({
+      terminalEnabled: true,
+    });
   });
 });
 

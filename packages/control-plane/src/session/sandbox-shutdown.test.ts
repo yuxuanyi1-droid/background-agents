@@ -755,6 +755,23 @@ describe("SandboxShutdownCoordinator", () => {
     expect(f.store.value).toMatchObject({ expiresAtMs: 1_100_000, drainAtMs: 500_000 });
   });
 
+  it("resolves auto-continue per drain through the session-settings override", async () => {
+    const f = fixture(retainedProvider());
+    // The deployment boolean stays off; only the resolver (the session's
+    // sandbox-settings toggle) turns the continuation on.
+    f.deps.resolveAutoContinueOnLifetimeExpiry = () => true;
+    f.deps.messages.getProcessingMessage.mockReturnValue({ id: "message-1" });
+    await readyFinite(f);
+
+    await expect(f.shutdown.requestShutdown("sandbox_lifetime_expiring")).resolves.toBe("owned");
+
+    expect(f.deps.failures.record).not.toHaveBeenCalled();
+    expect(f.store.value).toMatchObject({
+      messageId: "message-1",
+      autoContinue: { messageId: "message-1", count: 1 },
+    });
+  });
+
   it("auto-continues a lifetime drain by requeueing the prompt instead of failing it", async () => {
     const f = fixture(retainedProvider());
     f.deps.autoContinueOnLifetimeExpiry = true;

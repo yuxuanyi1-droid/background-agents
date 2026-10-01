@@ -43,6 +43,19 @@ vi.mock("@/hooks/use-repos", () => ({
   useRepos: () => ({ repos: reposMock.repos, loading: reposMock.loading }),
 }));
 
+const sandboxProvidersMock = vi.hoisted(() =>
+  vi.fn(() => ({
+    providers: [] as Array<{ name: "e2b"; label: string }>,
+    defaultProvider: "e2b" as const,
+    isLoading: false,
+    error: undefined as undefined,
+  }))
+);
+
+vi.mock("@/hooks/use-sandbox-providers", () => ({
+  useSandboxProviders: () => sandboxProvidersMock(),
+}));
+
 const SETTINGS_KEY = "/api/integration-settings/sandbox";
 
 function globalSettings(
@@ -162,6 +175,24 @@ describe("SandboxSettingsPage — tunnel ports editor", () => {
     for (const name of ["Service Ports", "Tunnel Ports", "Child Sessions", "Resources"]) {
       expect(screen.getByRole("group", { name })).toBeInTheDocument();
     }
+  });
+
+  it("shows the auto-continue toggle only when E2B is a configured provider", () => {
+    sandboxProvidersMock.mockReturnValueOnce({
+      providers: [{ name: "e2b", label: "E2B" }],
+      defaultProvider: "e2b",
+      isLoading: false,
+      error: undefined,
+    });
+    renderWithSWR({ integrationId: "sandbox", settings: null });
+    expect(screen.getByRole("switch", { name: "Auto-continue on sandbox lifetime limit" })).toBeInTheDocument();
+  });
+
+  it("hides the auto-continue toggle without a configured E2B provider", () => {
+    renderWithSWR({ integrationId: "sandbox", settings: null });
+    expect(
+      screen.queryByRole("switch", { name: "Auto-continue on sandbox lifetime limit" })
+    ).not.toBeInTheDocument();
   });
 
   it("hides unsupported Daytona controls and preserves stored intent when saving", async () => {

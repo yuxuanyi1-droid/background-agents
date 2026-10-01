@@ -23,7 +23,7 @@ type DraftKey<K> = K extends "sandboxTimeoutMs"
 export type SandboxSettingsDraftValues = {
   [K in keyof SandboxSettings as DraftKey<K>]-?: K extends "tunnelPorts"
     ? string[]
-    : K extends "terminalEnabled"
+    : K extends "terminalEnabled" | "autoContinueOnLifetimeExpiry"
       ? boolean
       : string;
 };
@@ -94,6 +94,12 @@ const fields: FieldRegistry = {
   },
   terminalEnabled: {
     draftKey: "terminalEnabled",
+    format: (value) => value ?? false,
+    parse: (value) => ({ value }),
+    isChanged: (value, current) => value !== current,
+  },
+  autoContinueOnLifetimeExpiry: {
+    draftKey: "autoContinueOnLifetimeExpiry",
     format: (value) => value ?? false,
     parse: (value) => ({ value }),
     isChanged: (value, current) => value !== current,

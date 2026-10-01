@@ -149,7 +149,9 @@ export async function initializeSession(
           },
         ]
       : [];
-  const sandboxProvider = resolveSandboxBackendName(env.SANDBOX_PROVIDER);
+  // The session's own provider decides which settings it can honor; the
+  // deployment default only covers sessions that did not choose one.
+  const sandboxProvider = input.sandboxProvider ?? resolveSandboxBackendName(env.SANDBOX_PROVIDER);
   const unsupportedSettings = unsupportedSandboxSettings(
     input.sandboxSettings ?? {},
     sandboxProvider

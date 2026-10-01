@@ -36,6 +36,7 @@ describe("resolveSandboxSettingsDraft", () => {
       values: {
         tunnelPorts: ["3000", "5173"],
         terminalEnabled: true,
+        autoContinueOnLifetimeExpiry: false,
         maxSessionCostUsd: "",
         codeServerPort: "8081",
         vncPort: "6081",
@@ -193,6 +194,7 @@ describe("resolveSandboxSettingsDraft", () => {
       settings: {
         tunnelPorts: [],
         terminalEnabled: true,
+        autoContinueOnLifetimeExpiry: false,
         maxConcurrentChildSessions: DEFAULT_MAX_CONCURRENT_CHILD_SESSIONS,
         maxTotalChildSessions: DEFAULT_MAX_TOTAL_CHILD_SESSIONS,
         cpuCores: 1e-7,
@@ -276,6 +278,7 @@ describe("resolveSandboxSettingsDraft", () => {
       settings: {
         tunnelPorts: [],
         terminalEnabled: false,
+        autoContinueOnLifetimeExpiry: false,
         maxConcurrentChildSessions: DEFAULT_MAX_CONCURRENT_CHILD_SESSIONS,
         maxTotalChildSessions: DEFAULT_MAX_TOTAL_CHILD_SESSIONS,
       },
@@ -290,7 +293,7 @@ describe("resolveSandboxSettingsDraft", () => {
       memoryMib: "",
     });
     expect(resolved.hasChanges).toBe(false);
-    const expected = { ...baseDefaults };
+    const expected = { ...baseDefaults, autoContinueOnLifetimeExpiry: false };
     delete expected.cpuCores;
     delete expected.memoryMib;
     expect(

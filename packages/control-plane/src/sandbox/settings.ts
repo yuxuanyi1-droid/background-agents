@@ -69,6 +69,14 @@ export function normalizeSandboxSettings(
     }
   }
 
+  if (settings.autoContinueOnLifetimeExpiry !== undefined) {
+    if (typeof settings.autoContinueOnLifetimeExpiry !== "boolean") {
+      reject("autoContinueOnLifetimeExpiry must be a boolean");
+    } else {
+      result.autoContinueOnLifetimeExpiry = settings.autoContinueOnLifetimeExpiry;
+    }
+  }
+
   if (settings.tunnelPorts !== undefined) {
     normalizeTunnelPorts(settings.tunnelPorts, reject, result);
   }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useRepos } from "@/hooks/use-repos";
+import { useSandboxProviders } from "@/hooks/use-sandbox-providers";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ChevronDownIcon, CheckIcon, PlusIcon } from "@/components/ui/icons";
@@ -140,12 +141,17 @@ export function SandboxSettingsEditor({
   const sandboxProvider = getPublicSandboxProvider();
   const configurableResources = supportsConfigurableSandboxResources();
   const configurableTimeout = supportsConfigurableSandboxTimeout();
+  const { providers: configuredProviders } = useSandboxProviders();
+  // Only a provider that pauses with memory and resumes in place (E2B) can
+  // honor the auto-continue toggle; hide it when the deployment has none.
+  const e2bConfigured = configuredProviders.some((provider) => provider.name === "e2b");
   const hiddenFields = new Set<keyof SandboxSettings>();
   if (!configurableResources) {
     hiddenFields.add("cpuCores");
     hiddenFields.add("memoryMib");
   }
   if (!configurableTimeout) hiddenFields.add("sandboxTimeoutMs");
+  if (!e2bConfigured) hiddenFields.add("autoContinueOnLifetimeExpiry");
   const isGlobal = scope === "global";
   const canManage = hasPermission(
     scope === "global"
@@ -379,6 +385,44 @@ export function SandboxSettingsEditor({
           )}
         </div>
       </fieldset>
+
+      {e2bConfigured ? (
+        <div className="max-w-sm">
+          <div className="flex items-center justify-between">
+            <div>
+              <label
+                htmlFor="sandbox-auto-continue"
+                className="block text-sm font-medium text-foreground"
+              >
+                Auto-continue on sandbox lifetime limit
+              </label>
+              <p className="text-xs text-muted-foreground">
+                When an E2B sandbox reaches its lifetime limit mid-task, resume it automatically
+                and continue the interrupted prompt instead of holding it for you.
+              </p>
+            </div>
+            <button
+              id="sandbox-auto-continue"
+              type="button"
+              role="switch"
+              aria-label="Auto-continue on sandbox lifetime limit"
+              aria-checked={values.autoContinueOnLifetimeExpiry}
+              onClick={() =>
+                updateField("autoContinueOnLifetimeExpiry", !values.autoContinueOnLifetimeExpiry)
+              }
+              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+                values.autoContinueOnLifetimeExpiry ? "bg-accent" : "bg-muted"
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform ${
+                  values.autoContinueOnLifetimeExpiry ? "translate-x-4" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       <SessionCostSettingsFields
         isGlobal={isGlobal}

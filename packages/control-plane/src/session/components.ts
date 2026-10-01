@@ -465,7 +465,20 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     onLifecycleChange: () => messageQueue.processMessageQueue(),
     reconcileStatusFromMessages: () => statusService.reconcileFromMessageState(),
     retireAccess: () => lifecycleManager.retireShutdownAccess(),
-    autoContinueOnLifetimeExpiry: env.SANDBOX_AUTO_CONTINUE === "true",
+    // The session's sandbox settings carry the UI toggle, resolved at drain
+    // time (the graph can be constructed before the session row exists); the
+    // env var is only the deployment default a session that never set one
+    // falls back to.
+    resolveAutoContinueOnLifetimeExpiry: () => {
+      try {
+        const settings = parsePersistedSandboxSettings(
+          sessionCoreRepository.getSession()?.sandbox_settings ?? null
+        );
+        return settings.autoContinueOnLifetimeExpiry ?? env.SANDBOX_AUTO_CONTINUE === "true";
+      } catch {
+        return env.SANDBOX_AUTO_CONTINUE === "true";
+      }
+    },
   });
   const lifecycleManager = createLifecycleManager({
     provider: sandboxProvider,
