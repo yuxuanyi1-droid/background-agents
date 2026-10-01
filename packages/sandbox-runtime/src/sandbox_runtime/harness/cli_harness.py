@@ -863,6 +863,11 @@ class CliHarness:
                     f"No output for {self.limits.inactivity_timeout_seconds:.0f}s."
                 )
             if message is _SERVER_EXITED:
+                if state.final_message_seen_at is not None:
+                    # The authoritative final answer already landed; a server
+                    # that exits immediately after delivering it (observed on
+                    # pi 0.87.1) must not fail a complete turn.
+                    return
                 code, tail = await server.exit_details()
                 detail = f"The {self.id.value} protocol server exited mid-turn (code {code})."
                 if tail:

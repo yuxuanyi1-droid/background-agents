@@ -353,6 +353,20 @@ class CodexVendor:
                     events.append({"type": "warning", "scope": "provider", "message": message})
             return events
         if kind == "turn.completed":
+            # A failed turn rides turn/completed with turn.error and no items;
+            # surface the provider's real reason instead of "no output".
+            turn = record.get("turn")
+            if isinstance(turn, dict):
+                error = turn.get("error")
+                if (
+                    isinstance(error, dict)
+                    and isinstance(error.get("message"), str)
+                    and error["message"]
+                ):
+                    return [
+                        *step_start_events(state),
+                        *error_event(state, error["message"]),
+                    ]
             usage = record.get("usage")
             if isinstance(usage, dict):
                 state.tokens = _usage_tokens(usage)

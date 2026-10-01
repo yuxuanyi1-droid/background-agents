@@ -516,3 +516,36 @@ async def test_resident_start_sweeps_orphaned_servers(tmp_path: Path) -> None:
     assert outcome.success
     assert orphan.wait(timeout=5) == -signal.SIGKILL
     await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_resident_exit_after_final_answer_settles_successfully(tmp_path: Path) -> None:
+    # pi 0.87.1 delivers the final message and exits immediately; a complete
+    # turn must not be failed by the server's own death.
+    import subprocess as sp
+
+    script = (
+        _SERVER_HEAD + "    elif kind == 'prompt':\n"
+        "        send({'id': message['id'], 'result': {'accepted': True}})\n"
+        "        send({'type': 'delta', 'text': 'The full answer.'})\n"
+        "        send({'type': 'final_message'})\n"
+        "        import sys\n"
+        "        sys.exit(0)\n"
+    )
+
+    class _ExitVendor(_ResidentScriptVendor):
+        settle_after_final_message = 0.5
+
+        def parse_server_message(self, message: dict[str, Any], state: CliTurnState) -> list[Any]:
+            if message.get("type") == "final_message":
+                state.final_message_seen_at = __import__("time").monotonic()
+                return []
+            return super().parse_server_message(message, state)
+
+    harness = _harness(_ExitVendor(script), tmp_path)
+    await harness.create_session()
+    outcome, events = await _run(harness)
+    assert outcome.success
+    tokens = [e["content"] for e in events if e["type"] == "token"]
+    assert tokens[-1] == "The full answer."
+    await harness.close()

@@ -153,6 +153,28 @@ class TestCodexAppServer:
             )
         assert settled.value.events[0]["type"] == "error"
 
+    def test_failed_turn_surfaces_the_provider_error(self) -> None:
+        # Codex rides a failed turn on turn/completed with turn.error and no
+        # items; the provider's reason must reach the user, not "no output".
+        vendor = CodexVendor()
+        state = _state()
+        with pytest.raises(CliTurnSettled) as settled:
+            vendor.parse_server_message(
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "t-1",
+                        "turn": {
+                            "status": "failed",
+                            "error": {"message": "Model does not support this protocol."},
+                        },
+                    },
+                },
+                state,
+            )
+        assert settled.value.events[-1]["type"] == "error"
+        assert "protocol" in settled.value.events[-1]["error"]
+
     def test_interrupt_uses_the_running_turn_id(self) -> None:
         vendor = CodexVendor()
         state = _state()
