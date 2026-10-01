@@ -142,6 +142,7 @@ function createDaytonaProviderFromEnv(env: Env): DaytonaSandboxProvider {
     scmProvider: resolveScmProviderFromEnv(env.SCM_PROVIDER),
     gitlabAccessToken: env.GITLAB_ACCESS_TOKEN,
     sandboxAccessPasswordSecret: client.config.apiKey,
+    controlPlaneUrlOverride: env.DAYTONA_CONTROL_PLANE_URL || undefined,
   });
 }
 

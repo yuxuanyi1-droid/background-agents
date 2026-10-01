@@ -72,6 +72,7 @@ export interface EnvConfig {
   MODAL_API_URL?: string;
   DAYTONA_API_URL?: string; // Daytona REST API base URL
   DAYTONA_BASE_SNAPSHOT?: string; // Named Daytona snapshot used for fresh sandbox creation
+  DAYTONA_CONTROL_PLANE_URL?: string; // Standard-port origin advertised to Daytona sandboxes when WORKER_URL rides a blocked port
   DAYTONA_AUTO_STOP_INTERVAL_MINUTES?: string; // Daytona idle stop interval in minutes
   DAYTONA_AUTO_ARCHIVE_INTERVAL_MINUTES?: string; // Daytona archive interval in minutes
   DAYTONA_TARGET?: string; // Optional Daytona target name

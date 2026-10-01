@@ -74,6 +74,8 @@ export interface DaytonaProviderConfig {
   gitlabAccessToken?: string;
   /** Secret used for domain-separated sandbox access password derivation. */
   sandboxAccessPasswordSecret: string;
+  /** Standard-port control-plane origin for Daytona sandboxes (see createSandbox). */
+  controlPlaneUrlOverride?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +277,14 @@ export class DaytonaSandboxProvider implements SandboxProvider {
         ? await deriveVncPassword(config.sandboxId, this.providerConfig.sandboxAccessPasswordSecret)
         : undefined,
     });
+
+    // A deployment whose Daytona egress cannot reach WORKER_URL (Daytona
+    // restricts sandbox egress to ports 80/443) advertises a standard-port
+    // origin for Daytona sandboxes alone; every other provider keeps
+    // WORKER_URL.
+    if (this.providerConfig.controlPlaneUrlOverride) {
+      envVars.CONTROL_PLANE_URL = this.providerConfig.controlPlaneUrlOverride;
+    }
 
     // Every boot marker is stated, never merely omitted: a container capture
     // preserves the image's environment, so an absent key would leave a value

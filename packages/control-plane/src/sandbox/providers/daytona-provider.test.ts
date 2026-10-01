@@ -1005,3 +1005,18 @@ describe("DaytonaSandboxProvider prebuilt images", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("daytona.preview_url_failed"));
   });
 });
+
+
+describe("Daytona control-plane URL override", () => {
+  it("advertises the override to sandboxes in place of config.controlPlaneUrl", () => {
+    const client = createMockClient();
+    const provider = new DaytonaSandboxProvider(client, {
+      ...defaultProviderConfig,
+      controlPlaneUrlOverride: "https://cp.example",
+    });
+    return provider.createSandbox(baseCreateConfig).then(() => {
+      const call = client.createSandbox.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect((call.env as Record<string, string>).CONTROL_PLANE_URL).toBe("https://cp.example");
+    });
+  });
+});
