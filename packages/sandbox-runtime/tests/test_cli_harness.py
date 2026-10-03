@@ -25,6 +25,7 @@ from sandbox_runtime.harness.cli_harness import (
     append_text_events,
     step_start_events,
 )
+from sandbox_runtime.harness.cli_vendors import PiVendor
 
 
 class _ScriptedVendor:
@@ -590,4 +591,60 @@ async def test_resident_exit_after_final_answer_settles_successfully(tmp_path: P
     assert outcome.success
     tokens = [e["content"] for e in events if e["type"] == "token"]
     assert tokens[-1] == "The full answer."
+    await harness.close()
+
+
+# A pi rpc server whose first assistant response requests a tool and carries
+# no text: the settle grace must not start on it, so the tool below may
+# outlive the grace and the answer that follows still settles the turn.
+_PI_RPC_SERVER = (
+    "import json, sys, time\n"
+    "def send(obj):\n"
+    "    print(json.dumps(obj), flush=True)\n"
+    "for line in sys.stdin:\n"
+    "    message = json.loads(line)\n"
+    "    kind = message.get('type')\n"
+    "    if kind == 'get_state':\n"
+    "        send({'id': message['id'], 'type': 'response', 'command': 'get_state',"
+    " 'success': True, 'data': {'sessionId': 'p-1'}})\n"
+    "    elif kind == 'prompt':\n"
+    "        send({'id': message['id'], 'type': 'response', 'command': 'prompt', 'success': True})\n"
+    "        send({'type': 'message_end', 'message': {'role': 'assistant', 'stopReason': 'toolUse',"
+    " 'content': [{'type': 'toolCall', 'id': 'c1', 'name': 'bash',"
+    " 'arguments': {'command': 'make'}}]}})\n"
+    "        time.sleep(1.0)\n"
+    "        send({'type': 'message_end', 'message': {'role': 'assistant', 'stopReason': 'stop',"
+    " 'content': [{'type': 'text', 'text': 'The build passed.'}]}})\n"
+    "        send({'type': 'agent_settled'})\n"
+)
+
+
+class _ScriptedPiVendor(PiVendor):
+    """PiVendor over a scripted server that speaks pi's rpc dialect."""
+
+    settle_after_final_message = 0.3
+
+    def __init__(self, script: str) -> None:
+        super().__init__()
+        self.binary = sys.executable
+        self._script = script
+
+    def server_argv(
+        self,
+        *,
+        session_id: str | None,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> list[str]:
+        return ["-c", self._script]
+
+
+@pytest.mark.asyncio
+async def test_pi_tool_message_does_not_settle_the_turn_mid_step(tmp_path: Path) -> None:
+    harness = _harness(_ScriptedPiVendor(_PI_RPC_SERVER), tmp_path)
+    await harness.create_session()
+    outcome, events = await _run(harness)
+    assert outcome.success, outcome.error
+    tokens = [e["content"] for e in events if e["type"] == "token"]
+    assert tokens == ["The build passed."]
     await harness.close()

@@ -675,20 +675,33 @@ class PiVendor:
         """The authoritative assistant message; also the only failure signal.
 
         Pi exits 0 even when the provider rejected the turn, so an assistant
-        message with ``stopReason: "error"`` is what fails it here. The final
-        text replaces the accumulated deltas only when it is longer, so an
-        earlier assistant message's text is never lost.
+        message with ``stopReason: "error"`` is what fails it here — but only
+        if no later response shows pi got past it. The final text replaces the
+        accumulated deltas only when it is longer, so an earlier assistant
+        message's text is never lost.
         """
         message = record.get("message")
         if not isinstance(message, dict) or message.get("role") != "assistant":
             return []
         events: list[Any] = []
-        if message.get("stopReason") == "error":
+        stop_reason = message.get("stopReason")
+        if stop_reason == "error":
             detail = str(message.get("errorMessage") or "Pi reported a provider error")
             events += error_event(state, detail)
-        elif message.get("stopReason") not in (None, "aborted"):
-            # stopReason "stop" (or a vendor alias): the final answer landed.
-            state.final_message_seen_at = time.monotonic()
+        elif stop_reason not in (None, "aborted", "pending"):
+            # A response that leaves tool calls to run ("toolUse") is not the
+            # final answer — pi keeps going while tools execute — so the
+            # settle grace must not start on it, or a tool that outlives the
+            # grace settles the turn before its answer exists.
+            if not _pi_has_tool_calls(message):
+                state.final_message_seen_at = time.monotonic()
+            if state.error:
+                # Any completed response after a failed one means pi recovered
+                # on its own — an internal retry or overflow compaction
+                # continued the run — so the transient failure must not fail
+                # a turn that delivered an answer.
+                state.error = None
+                state.emitted_error = False
         final_text = _as_text(message.get("content"))
         if final_text and len(final_text) > len(state.text):
             events += text_events(state, final_text)
@@ -971,6 +984,17 @@ def _codex_status(status: Any) -> str:
     if status == "completed":
         return "completed"
     return "running"
+
+
+def _pi_has_tool_calls(message: dict[str, Any]) -> bool:
+    """Whether a pi assistant message leaves tool calls to execute.
+
+    Pi's own loop continues while any tool call is pending, so such a message
+    is never the final answer of the turn."""
+    content = message.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(block, dict) and block.get("type") == "toolCall" for block in content)
 
 
 def _pi_result_text(result: Any) -> str:

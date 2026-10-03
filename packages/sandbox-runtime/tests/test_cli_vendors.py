@@ -829,6 +829,116 @@ class TestPi:
         )
         assert events == [{"type": "token", "content": "Hello", "messageId": "m1"}]
 
+    def test_toolcall_message_is_not_the_final_answer(self) -> None:
+        # pi keeps the run going while tools execute, so a "toolUse" message
+        # must not arm the settle grace — a tool run longer than the grace
+        # used to settle the turn mid-step, as "pi completed without emitting
+        # assistant output" when the message carried no text.
+        vendor = PiVendor()
+        state = _state()
+        vendor.parse_record(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "toolCall",
+                            "id": "c1",
+                            "name": "bash",
+                            "arguments": {"command": "make"},
+                        }
+                    ],
+                    "stopReason": "toolUse",
+                },
+            },
+            state,
+        )
+        assert state.final_message_seen_at is None
+
+        vendor.parse_record(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Done."}],
+                    "stopReason": "stop",
+                },
+            },
+            state,
+        )
+        assert state.final_message_seen_at is not None
+
+    def test_a_recovered_provider_error_does_not_fail_the_turn(self) -> None:
+        # pi retries a retryable provider error internally; the completed
+        # response that follows proves the run continued, so the failure was
+        # transient and must not fail a turn that delivered an answer.
+        vendor = PiVendor()
+        state = _state()
+        vendor.parse_record(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [],
+                    "stopReason": "error",
+                    "errorMessage": "429 rate limited",
+                },
+            },
+            state,
+        )
+        assert state.error == "429 rate limited"
+
+        vendor.parse_record(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Recovered."}],
+                    "stopReason": "stop",
+                },
+            },
+            state,
+        )
+        assert state.error is None
+        assert vendor.exit_outcome(state, 0, "").success
+
+        # A tool-call response proves the same recovery: pi is mid-run, so
+        # the earlier failure is equally stale.
+        state = _state()
+        vendor.parse_record(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [],
+                    "stopReason": "error",
+                    "errorMessage": "429 rate limited",
+                },
+            },
+            state,
+        )
+        vendor.parse_record(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "toolCall", "id": "c1", "name": "bash", "arguments": {}}],
+                    "stopReason": "toolUse",
+                },
+            },
+            state,
+        )
+        assert state.error is None
+
+    def test_exit_outcome(self) -> None:
+        assert PiVendor().exit_outcome(_state(), 0, "") == TurnOutcome.failed(
+            "pi completed without emitting assistant output."
+        )
+        state = _state()
+        state.text = "hi"
+        assert PiVendor().exit_outcome(state, 0, "").success
+
 
 class TestZcode:
     def test_argv_is_headless_prompt_with_optional_resume(self) -> None:
