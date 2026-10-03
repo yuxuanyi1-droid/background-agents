@@ -128,6 +128,13 @@ export const sandboxEventSchema = z.discriminatedUnion("type", [
     content: z.string(),
     partId: z.string().min(1).optional(),
   }),
+  // The model's reasoning trail: a display stream like `token`, but never
+  // folded into the assistant answer text.
+  messageSandboxEventBaseSchema.extend({
+    type: z.literal("thinking"),
+    content: z.string(),
+    partId: z.string().min(1).optional(),
+  }),
   messageSandboxEventBaseSchema.extend({
     type: z.literal("tool_call"),
     tool: z.string(),
