@@ -135,7 +135,7 @@ class TestCodexAppServer:
                 state,
             )
         assert state.completed
-        assert state.tokens == {"input_tokens": 3}
+        assert state.tokens == {"input": 3}
         # The step already fired at the first output; the sentinel may carry
         # no further events — the harness emits whatever rides it either way.
         assert isinstance(settled.value.events, list)
@@ -256,6 +256,131 @@ class TestCodexAppServer:
         assert not vendor.setup_lock_contention("no rollout found for thread t-1")
         assert not vendor.turn_start_busy_failure("turn already in progress")
         assert not vendor.previous_run_settled({"method": "turn/completed"})
+
+    def test_command_items_reach_the_translator_with_their_output(self) -> None:
+        # App-server command items carry camelCase fields (aggregatedOutput);
+        # the exec-shaped parser reads snake_case, so without the adapter the
+        # command's output is silently dropped from the tool_call event.
+        vendor = CodexVendor()
+        state = _state()
+        events = vendor.parse_server_message(
+            {
+                "method": "item/completed",
+                "params": {
+                    "threadId": "t-1",
+                    "item": {
+                        "id": "c1",
+                        "type": "commandExecution",
+                        "command": "ls",
+                        "status": "completed",
+                        "aggregatedOutput": "a.txt",
+                    },
+                },
+            },
+            state,
+        )
+        tool = next(event for event in events if event["type"] == "tool_call")
+        assert tool["tool"] == "bash"
+        assert tool["status"] == "completed"
+        assert tool["output"] == "a.txt"
+
+    def test_declined_command_is_an_error_not_running_work(self) -> None:
+        # A declined approval means the command never ran; reporting it as
+        # still running leaves a permanently pending tool call in the UI.
+        vendor = CodexVendor()
+        state = _state()
+        events = vendor.parse_server_message(
+            {
+                "method": "item/completed",
+                "params": {
+                    "threadId": "t-1",
+                    "item": {
+                        "id": "c1",
+                        "type": "commandExecution",
+                        "command": "rm -rf /",
+                        "status": "declined",
+                    },
+                },
+            },
+            state,
+        )
+        tool = next(event for event in events if event["type"] == "tool_call")
+        assert tool["status"] == "error"
+
+    def test_interrupted_turn_settles_as_cancelled(self) -> None:
+        # Every terminal turn rides turn/completed; an interrupted one must
+        # not settle as success (or as a misleading "no output" failure).
+        vendor = CodexVendor()
+        state = _state()
+        with pytest.raises(CliTurnSettled):
+            vendor.parse_server_message(
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "t-1",
+                        "turn": {"id": "turn-7", "status": "interrupted"},
+                    },
+                },
+                state,
+            )
+        assert state.cancelled
+        outcome = vendor.exit_outcome(state, 0, "")
+        assert outcome.cancelled and not outcome.success
+        assert outcome.error == "Task was cancelled"
+
+    def test_failed_turn_without_a_message_still_fails(self) -> None:
+        # turn.error is optional on a failed turn; the settle must not fall
+        # through to success when the provider gave no reason.
+        vendor = CodexVendor()
+        state = _state()
+        with pytest.raises(CliTurnSettled) as settled:
+            vendor.parse_server_message(
+                {
+                    "method": "turn/completed",
+                    "params": {"threadId": "t-1", "turn": {"id": "turn-7", "status": "failed"}},
+                },
+                state,
+            )
+        assert settled.value.events[-1]["type"] == "error"
+        assert state.error == "Codex turn failed"
+
+    def test_token_usage_notification_feeds_the_settled_tokens(self) -> None:
+        # The v2 turn carries no usage; the thread's tokenUsage notification
+        # is the only source, and its breakdown is camelCase.
+        vendor = CodexVendor()
+        state = _state()
+        assert (
+            vendor.parse_server_message(
+                {
+                    "method": "thread/tokenUsage/updated",
+                    "params": {
+                        "threadId": "t-1",
+                        "turnId": "turn-7",
+                        "tokenUsage": {
+                            "total": {
+                                "totalTokens": 120,
+                                "inputTokens": 100,
+                                "cachedInputTokens": 40,
+                                "cacheWriteInputTokens": 10,
+                                "outputTokens": 20,
+                                "reasoningOutputTokens": 5,
+                            },
+                            "last": {"totalTokens": 120},
+                            "modelContextWindow": 400000,
+                        },
+                    },
+                },
+                state,
+            )
+            == []
+        )
+        assert state.tokens == {
+            "input": 100,
+            "output": 20,
+            "reasoning": 5,
+            "cache": {"read": 40, "write": 10},
+            "total": 120,
+        }
 
 
 class TestPiRpc:
@@ -527,7 +652,7 @@ class TestZcodeAppServer:
                 state,
             )
         assert state.completed
-        assert state.tokens == {"input_tokens": 5}
+        assert state.tokens == {"input": 5}
         assert settled.value.events[-1]["type"] == "token"
         assert settled.value.events[-1]["content"] == "Hello"
 
@@ -720,7 +845,21 @@ class TestCodex:
             reasoning_effort=None,
             workdir=WORKDIR,
         )
-        assert resume[:3] == ["exec", "resume", "thread-1"]
+        # --cd is an exec option, not one of the global ones: after the resume
+        # subcommand clap rejects it as an unexpected argument, so every shared
+        # flag precedes the subcommand and the prompt stays last.
+        assert resume == [
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--cd",
+            str(WORKDIR),
+            "resume",
+            "thread-1",
+            "--",
+            "again",
+        ]
 
     def test_model_provider_selects_the_custom_gateway(self) -> None:
         vendor = CodexVendor()
@@ -816,7 +955,7 @@ class TestCodex:
             {"type": "turn.completed", "usage": {"input_tokens": 3, "output_tokens": 5}}, state
         )
         assert state.completed
-        assert state.tokens == {"input_tokens": 3, "output_tokens": 5}
+        assert state.tokens == {"input": 3, "output": 5}
 
     def test_compaction_item_emits_context_compacted(self) -> None:
         vendor = CodexVendor()

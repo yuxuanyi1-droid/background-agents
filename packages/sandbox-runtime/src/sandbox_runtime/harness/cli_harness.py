@@ -90,6 +90,9 @@ class CliTurnState:
     tokens: dict[str, Any] | None = None
     step_started: bool = False
     completed: bool = False
+    # The vendor reported the turn as aborted (a stop the client asked for, or
+    # the vendor's own interruption); the turn settles as cancelled, not failed.
+    cancelled: bool = False
     tool_names: dict[str, str] = field(default_factory=dict)
     tool_args: dict[str, dict[str, Any]] = field(default_factory=dict)
     agent_texts: dict[str, str] = field(default_factory=dict)

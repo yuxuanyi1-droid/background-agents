@@ -125,6 +125,20 @@ _CODEX_ITEM_TYPES = {
     "contextCompaction": "context_compaction",
 }
 
+# App-server item payload fields are camelCase where the exec records the
+# translator reads are snake_case. The command item is the only type whose
+# fields differ; MCP ``arguments``/``result`` hold arbitrary user JSON whose
+# nested keys must survive untouched, so no generic key conversion applies.
+_CODEX_ITEM_FIELD_RENAMES = {
+    "command_execution": {
+        "aggregatedOutput": "aggregated_output",
+        "exitCode": "exit_code",
+        "commandActions": "command_actions",
+        "processId": "process_id",
+        "durationMs": "duration_ms",
+    },
+}
+
 
 class CodexVendor:
     """OpenAI Codex CLI driven through its resident app-server.
@@ -163,16 +177,19 @@ class CodexVendor:
         workdir: Path,
         model_provider: str | None = None,
     ) -> list[str]:
-        argv = ["exec"]
-        if session_id:
-            argv += ["resume", session_id]
-        argv += [
+        # ``--cd`` belongs to the exec options, not the global set: after the
+        # ``resume`` subcommand clap rejects it as an unexpected argument, so
+        # every shared flag stays before the subcommand.
+        argv = [
+            "exec",
             "--json",
             "--skip-git-repo-check",
             "--dangerously-bypass-approvals-and-sandbox",
             "--cd",
             str(workdir),
         ]
+        if session_id:
+            argv += ["resume", session_id]
         if model_provider:
             argv += ["-c", f"model_provider={model_provider}"]
             # The catalog carries the routed model's metadata (context window,
@@ -291,6 +308,15 @@ class CodexVendor:
         method = message.get("method")
         if not isinstance(method, str):
             return []
+        if method == "thread/tokenUsage/updated":
+            # The app-server carries usage only here (the v2 turn has no usage
+            # field); keep the thread total the exec stream reports at its
+            # turn.completed so both paths record the same figure.
+            usage = message.get("params", {}).get("tokenUsage")
+            total = usage.get("total") if isinstance(usage, dict) else None
+            if isinstance(total, dict):
+                state.tokens = _usage_tokens(total)
+            return []
         record = self._exec_record(message)
         if method == "turn/started":
             turn = message.get("params", {}).get("turn", {})
@@ -346,7 +372,11 @@ class CodexVendor:
             adapted = dict(item)
             item_type = adapted.get("type")
             if isinstance(item_type, str):
-                adapted["type"] = _CODEX_ITEM_TYPES.get(item_type, item_type)
+                item_type = _CODEX_ITEM_TYPES.get(item_type, item_type)
+                adapted["type"] = item_type
+                for field, renamed in _CODEX_ITEM_FIELD_RENAMES.get(item_type, {}).items():
+                    if field in adapted:
+                        adapted[renamed] = adapted.pop(field)
             record["item"] = adapted
         turn = params.get("turn")
         if isinstance(turn, dict):
@@ -390,10 +420,16 @@ class CodexVendor:
                 events.append({"type": "context_compacted", "messageId": state.message_id})
             return events
         if kind == "turn.completed":
-            # A failed turn rides turn/completed with turn.error and no items;
-            # surface the provider's real reason instead of "no output".
+            # The app-server reports every terminal turn through this one
+            # notification, distinguished by the turn's status.
             turn = record.get("turn")
             if isinstance(turn, dict):
+                if turn.get("status") == "interrupted":
+                    # The turn was aborted (a stop the client asked for, or
+                    # codex's own cancellation); it settles as cancelled so
+                    # the stop is not reported as a completed turn.
+                    state.cancelled = True
+                    return step_start_events(state)
                 error = turn.get("error")
                 if (
                     isinstance(error, dict)
@@ -403,6 +439,12 @@ class CodexVendor:
                     return [
                         *step_start_events(state),
                         *error_event(state, error["message"]),
+                    ]
+                if turn.get("status") == "failed":
+                    # Failed with no message of its own; still a failure.
+                    return [
+                        *step_start_events(state),
+                        *error_event(state, "Codex turn failed"),
                     ]
             usage = record.get("usage")
             if isinstance(usage, dict):
@@ -1085,7 +1127,10 @@ def get_cli_vendor(harness_id: HarnessId) -> Any:
 
 
 def _codex_status(status: Any) -> str:
-    if status == "failed":
+    # Declined: the approval was refused, so the command never ran — an error
+    # outcome, not work still in progress. The one-shot stream spells it
+    # snake_case ("declined"), the app-server camelCase ("declined" too).
+    if status in ("failed", "declined"):
         return "error"
     if status == "completed":
         return "completed"
@@ -1109,12 +1154,54 @@ def _pi_result_text(result: Any) -> str:
     return _as_text(result)
 
 
+# Vendors report usage with different flat key styles (codex snake_case, pi
+# camelCase); each canonical count maps to its known spellings in preference
+# order. ``total`` is the vendor's own turn total where it reports one.
+_USAGE_KEY_SPELLINGS: dict[str, tuple[str, ...]] = {
+    "input": ("input_tokens", "inputTokens", "input"),
+    "output": ("output_tokens", "outputTokens", "output"),
+    "reasoning": (
+        "reasoning_output_tokens",
+        "reasoningOutputTokens",
+        "reasoning_tokens",
+        "reasoningTokens",
+        "reasoning",
+    ),
+    "read": (
+        "cached_input_tokens",
+        "cachedInputTokens",
+        "cache_read_input_tokens",
+        "cacheReadInputTokens",
+        "cacheRead",
+    ),
+    "write": (
+        "cache_write_input_tokens",
+        "cacheWriteInputTokens",
+        "cache_creation_input_tokens",
+        "cacheWrite",
+    ),
+    "total": ("total_tokens", "totalTokens", "total"),
+}
+
+
 def _usage_tokens(usage: dict[str, Any]) -> dict[str, Any]:
-    tokens: dict[str, Any] = {}
-    for key in ("input_tokens", "output_tokens", "cached_input_tokens", "reasoning_tokens"):
-        value = usage.get(key)
-        if isinstance(value, (int, float)):
-            tokens[key] = value
+    """Canonical token usage (the bridge's nested shape) from a vendor's flat
+    usage object, or ``{}`` when it carries no counts the bridge understands."""
+    picks: dict[str, int] = {}
+    for canonical, spellings in _USAGE_KEY_SPELLINGS.items():
+        for spelling in spellings:
+            value = usage.get(spelling)
+            if isinstance(value, int) and not isinstance(value, bool):
+                picks[canonical] = value
+                break
+    tokens: dict[str, Any] = {
+        key: picks[key] for key in ("input", "output", "reasoning") if key in picks
+    }
+    cache = {key: picks[key] for key in ("read", "write") if key in picks}
+    if cache:
+        tokens["cache"] = cache
+    if "total" in picks:
+        tokens["total"] = picks["total"]
     return tokens
 
 
@@ -1132,6 +1219,13 @@ def _error_text(value: Any) -> str:
 def _default_exit_outcome(
     name: str, state: CliTurnState, returncode: int | None, stderr_tail: str
 ) -> TurnOutcome:
+    if state.cancelled:
+        return TurnOutcome(
+            success=False,
+            error="Task was cancelled",
+            cancelled=True,
+            message_cost_usd=state.cost_usd,
+        )
     if state.error:
         return TurnOutcome.failed(state.error, message_cost_usd=state.cost_usd)
     if returncode != 0:
