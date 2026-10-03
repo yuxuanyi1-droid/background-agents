@@ -74,6 +74,60 @@ describe("POST /internal/archive", () => {
 
     expect(res.status).toBe(200);
   });
+
+  it("archives a session whose pending prompt was stranded by a spawn failure", async () => {
+    const { stub } = await initSession({ userId: "user-1" });
+    await waitForSandboxStatus(stub, "failed");
+
+    // A prompt enqueued after the warm spawn failed starts its own spawn. The
+    // integration provider is permanently unavailable, so that spawn fails too
+    // and the prompt is left pending — the state whose queued work used to pin
+    // the session open forever.
+    const promptRes = await stub.fetch("http://internal/internal/prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "hello", authorId: "user-1", source: "web" }),
+    });
+    expect(promptRes.status).toBe(200);
+    const { messageId } = await promptRes.json<{ messageId: string }>();
+
+    const [message] = await queryDO<{ created_at: number; status: string }>(
+      stub,
+      "SELECT created_at, status FROM messages WHERE id = ?",
+      messageId
+    );
+    expect(message?.status).toBe("pending");
+
+    // Wait for the prompt's own spawn attempt to fail; that is what writes a
+    // failure reason newer than the prompt and marks it stranded.
+    let failedAt: number | null = null;
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const [sandbox] = await queryDO<{ last_spawn_error_at: number | null }>(
+        stub,
+        "SELECT last_spawn_error_at FROM sandbox LIMIT 1"
+      );
+      failedAt = sandbox?.last_spawn_error_at ?? null;
+      if (failedAt !== null && failedAt > message.created_at) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(failedAt).toBeGreaterThan(message.created_at);
+
+    const res = await stub.fetch("http://internal/internal/archive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "user-1" }),
+    });
+    expect(res.status).toBe(200);
+
+    const [settled] = await queryDO<{ status: string; error_message: string | null }>(
+      stub,
+      "SELECT status, error_message FROM messages WHERE id = ?",
+      messageId
+    );
+    expect(settled?.status).toBe("failed");
+    expect(settled?.error_message).toContain("Failed to create sandbox");
+  });
 });
 
 describe("POST /internal/unarchive", () => {

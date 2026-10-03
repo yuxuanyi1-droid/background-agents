@@ -1,4 +1,5 @@
 import type { SandboxCancellation } from "../../../sandbox/lifecycle/ports";
+import { isDeadSandboxStatus } from "../../../sandbox/lifecycle/decisions";
 import type { SessionStatus } from "@open-inspect/shared/types/sessions";
 import {
   SESSION_ARCHIVE_HTTP_STATUS,
@@ -7,6 +8,7 @@ import {
 import type { SessionCoreRepository } from "../../session-core-repository";
 import type { SandboxStateReader } from "../../sandbox-ports";
 import type { MessageRepository } from "../../message-repository";
+import type { SessionMessageQueue } from "../../message-queue";
 import type { SessionStatusService } from "../../session-status-service";
 import type { SessionTitleService } from "../../title-service";
 import { resolvePublicSessionId } from "../../public-session-id";
@@ -52,6 +54,9 @@ const titleUpdateBodySchema = z.object({
   title: z.string().optional(),
 });
 
+/** Shown on a stranded prompt when the sandbox has no persisted error of its own. */
+const STRANDED_PENDING_FALLBACK_ERROR = "Sandbox failed to start";
+
 type TitleUpdateBody = z.infer<typeof titleUpdateBodySchema>;
 
 /**
@@ -64,6 +69,7 @@ export class SessionLifecycleHandler {
     private readonly sessionCoreRepository: SessionCoreRepository,
     private readonly sandboxRepository: SandboxStateReader,
     private readonly messageRepository: MessageRepository,
+    private readonly messageQueue: Pick<SessionMessageQueue, "failPendingMessage">,
     private readonly statusService: SessionStatusService,
     private readonly titleService: SessionTitleService,
     private readonly sandboxLifecycle: SandboxCancellation,
@@ -156,6 +162,8 @@ export class SessionLifecycleHandler {
       });
     }
 
+    await this.settleStrandedPendingMessages();
+
     if (this.messageRepository.getPendingOrProcessingCount() > 0) {
       return archiveResponse("skipped_queued_work", {
         error: "Cannot archive a session with queued work",
@@ -173,6 +181,38 @@ export class SessionLifecycleHandler {
     return archiveResponse(session.status === "archived" ? "already_archived" : "archived", {
       status: "archived",
     });
+  }
+
+  /**
+   * Fail pending prompts a dead sandbox can no longer run.
+   *
+   * A prompt queued before the sandbox's last spawn failure had its recovery
+   * deferred to the user's "next message" (or a spawn retry, which an open
+   * circuit breaker refuses). For a one-shot bot prompt that next message never
+   * arrives, so the prompt is stranded — and while it is `pending`, the session
+   * can never be archived. An explicit archive is the user retiring the session,
+   * so the stranded prompts are failed with the sandbox's own error instead of
+   * blocking it. Prompts enqueued after the last failure are the fresh queue a
+   * later successful spawn would run, so they are left pending and still block
+   * the archive.
+   *
+   * `last_spawn_error_at` is written for every failure the user is shown — an
+   * open-circuit-breaker refusal and a connecting timeout included — so this
+   * covers each way a prompt can be stranded.
+   */
+  private async settleStrandedPendingMessages(): Promise<void> {
+    const sandbox = this.sandboxRepository.getSandbox();
+    if (!sandbox) return;
+    const failedAt = sandbox.last_spawn_error_at;
+    if (failedAt == null || !isDeadSandboxStatus(sandbox.status)) return;
+
+    const reason = sandbox.last_spawn_error ?? STRANDED_PENDING_FALLBACK_ERROR;
+    const stranded = this.messageRepository
+      .listPendingMessagesWithCreatedAt()
+      .filter((message) => message.created_at < failedAt);
+    for (const message of stranded) {
+      await this.messageQueue.failPendingMessage(message.id, reason);
+    }
   }
 
   /**

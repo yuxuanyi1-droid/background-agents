@@ -776,6 +776,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     sessionCoreRepository,
     sandboxRepository,
     messageRepository,
+    messageQueue,
     statusService,
     titleService,
     lifecycleManager,

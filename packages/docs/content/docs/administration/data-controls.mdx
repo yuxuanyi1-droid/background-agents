@@ -37,7 +37,7 @@ What archiving does:
 - The session's status becomes `archived`. It disappears from the inbox and from the default sessions list, which exclude archived sessions.
 - The session can no longer be prompted. Archived is not a promptable status, and follow-ups are refused until the session is restored.
 - The session's history, diffs, pull requests, and attribution are kept.
-- Archiving requests a preserve-and-stop shutdown rather than leaving the sandbox running until its inactivity timeout. State capture and provider shutdown may finish after the archive request returns, and either may fail. Queued or running work must finish or be stopped before archiving.
+- Archiving requests a preserve-and-stop shutdown rather than leaving the sandbox running until its inactivity timeout. State capture and provider shutdown may finish after the archive request returns, and either may fail. Queued or running work must finish or be stopped before archiving, with one exception: prompts stranded by a failed sandbox start are failed on archive (see below).
 
 Two situations are refused:
 
@@ -46,7 +46,9 @@ Two situations are refused:
 | The session is cancelled               | "Cancelled sessions cannot be archived." Cancelled is already a terminal state.            |
 | The session has queued or running work | "Cannot archive a session with queued work." Wait for the turn to finish or stop it first. |
 
-In the web app a refused archive shows the toast "Failed to archive session".
+A prompt whose sandbox never started is the exception. When a spawn fails, the prompt is left pending so it can be retried on your next message; but no retry is coming for a session you are trying to retire, and while that prompt is pending the archive is refused. Archiving settles those prompts: any prompt queued before the sandbox's last spawn failure is failed with the sandbox's own error and the archive proceeds. Prompts sent after the last failure still block the archive, because a later successful start would run them.
+
+In the web app a refused archive shows the control plane's reason, such as "Cannot archive a session with queued work".
 
 Archiving a child session does not affect its parent. A child that is archived must be restored before its parent can send it another prompt; see [Child sessions](/sessions/child-sessions).
 

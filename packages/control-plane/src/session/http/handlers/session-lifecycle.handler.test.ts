@@ -80,6 +80,9 @@ function createHandler() {
   const repository = {
     getPendingOrProcessingCount: vi.fn(() => 0),
     getMessageCount: vi.fn(() => 0),
+    listPendingMessagesWithCreatedAt: vi.fn<() => Array<{ id: string; created_at: number }>>(
+      () => []
+    ),
     getSession,
   };
   const getSandbox = vi.fn<() => SandboxRow | null>();
@@ -100,11 +103,15 @@ function createHandler() {
   const cancelSession = vi.fn();
   const cancelSandbox = vi.fn();
   const preserveForArchive = vi.fn(async () => undefined);
+  const failPendingMessage = vi.fn<(messageId: string, error: string) => Promise<void>>(
+    async () => undefined
+  );
 
   const lifecycleHandler = new SessionLifecycleHandler(
     repository as unknown as SessionCoreRepository,
     sandboxRepository,
     repository as unknown as MessageRepository,
+    { failPendingMessage },
     statusService,
     { applySessionTitleUpdate } as unknown as SessionTitleService,
     { cancelSandbox, preserveForArchive },
@@ -135,6 +142,7 @@ function createHandler() {
     cancelSession,
     cancelSandbox,
     preserveForArchive,
+    failPendingMessage,
   };
 }
 
@@ -419,6 +427,69 @@ describe("SessionLifecycleHandler", () => {
     expect(response.status).toBe(409);
     expect(transition).not.toHaveBeenCalled();
     expect(preserveForArchive).not.toHaveBeenCalled();
+  });
+
+  it("settles a prompt stranded by the sandbox's last spawn failure", async () => {
+    const { handler, getSession, getSandbox, repository, transition, failPendingMessage } =
+      createHandler();
+    getSession.mockReturnValue(createSession());
+    getSandbox.mockReturnValue(
+      createSandbox({
+        status: "failed",
+        last_spawn_error: "Failed to create sandbox: workspace is disabled",
+        last_spawn_error_at: 2000,
+      })
+    );
+    repository.listPendingMessagesWithCreatedAt.mockReturnValue([
+      { id: "msg-stranded", created_at: 1500 },
+    ]);
+    transition.mockResolvedValue(true);
+
+    const response = await handler.archive();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ outcome: "archived", status: "archived" });
+    expect(failPendingMessage).toHaveBeenCalledWith(
+      "msg-stranded",
+      "Failed to create sandbox: workspace is disabled"
+    );
+    expect(transition).toHaveBeenCalledWith("archived");
+  });
+
+  it("leaves a prompt queued after the failure pending and blocks the archive", async () => {
+    const { handler, getSession, getSandbox, repository, transition, failPendingMessage } =
+      createHandler();
+    getSession.mockReturnValue(createSession());
+    getSandbox.mockReturnValue(
+      createSandbox({ status: "failed", last_spawn_error: "boom", last_spawn_error_at: 1000 })
+    );
+    repository.listPendingMessagesWithCreatedAt.mockReturnValue([
+      { id: "msg-fresh", created_at: 1500 },
+    ]);
+    repository.getPendingOrProcessingCount.mockReturnValue(1);
+
+    const response = await handler.archive();
+
+    expect(response.status).toBe(409);
+    expect(failPendingMessage).not.toHaveBeenCalled();
+    expect(transition).not.toHaveBeenCalled();
+  });
+
+  it("does not settle queued prompts while the sandbox can still run them", async () => {
+    const { handler, getSession, getSandbox, repository, failPendingMessage } = createHandler();
+    getSession.mockReturnValue(createSession());
+    getSandbox.mockReturnValue(
+      createSandbox({ status: "ready", last_spawn_error: "boom", last_spawn_error_at: 2000 })
+    );
+    repository.listPendingMessagesWithCreatedAt.mockReturnValue([
+      { id: "msg-fresh", created_at: 1500 },
+    ]);
+    repository.getPendingOrProcessingCount.mockReturnValue(1);
+
+    const response = await handler.archive();
+
+    expect(response.status).toBe(409);
+    expect(failPendingMessage).not.toHaveBeenCalled();
   });
 
   it("returns 409 when archiving a cancelled session", async () => {
