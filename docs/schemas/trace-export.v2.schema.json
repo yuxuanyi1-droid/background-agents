@@ -170,6 +170,7 @@
                   "sandbox_generation_ready",
                   "preservation_prepared",
                   "token",
+                  "thinking",
                   "tool_call",
                   "step_start",
                   "step_finish",

@@ -34,6 +34,16 @@ export class SandboxStreamingEventHandler {
     this.messenger.broadcast({ type: "sandbox_event", event });
   }
 
+  handleThinking(
+    event: Extract<SandboxEvent, { type: "thinking" }>,
+    context: SandboxEventContext
+  ): void {
+    if (context.messageId) {
+      this.eventRepository.upsertThinkingEvent(context.messageId, event, context.now);
+    }
+    this.messenger.broadcast({ type: "sandbox_event", event });
+  }
+
   handleContextCompacted(
     event: Extract<SandboxEvent, { type: "context_compacted" }>,
     context: SandboxEventContext

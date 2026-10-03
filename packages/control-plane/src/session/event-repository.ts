@@ -9,9 +9,13 @@ import type { SqlStorage, TransactionSync } from "./sql-storage";
 import { eventRowSchema, SessionStorageIntegrityError, type EventRow } from "./types";
 
 type TokenEvent = Extract<SandboxEvent, { type: "token" }>;
+type ThinkingEvent = Extract<SandboxEvent, { type: "thinking" }>;
 type ToolCallEvent = Extract<SandboxEvent, { type: "tool_call" }>;
 type ExecutionCompleteEvent = Extract<SandboxEvent, { type: "execution_complete" }>;
-type UpsertableEventType = TokenEvent["type"] | ExecutionCompleteEvent["type"];
+type UpsertableEventType =
+  | TokenEvent["type"]
+  | ThinkingEvent["type"]
+  | ExecutionCompleteEvent["type"];
 
 const NEXT_TIMELINE_SEQUENCE_SQL = "(SELECT COALESCE(MAX(timeline_sequence), 0) + 1 FROM events)";
 
@@ -91,6 +95,14 @@ export class EventRepository {
         `token:${data.messageId}:${data.id}`,
         `token:${data.messageId}`
       );
+      // The thinking trail is segmented like the text: a later upsert starts
+      // a new row after the boundary instead of moving the pre-compaction
+      // one across it.
+      this.sql.exec(
+        `UPDATE events SET id = ? WHERE id = ?`,
+        `thinking:${data.messageId}:${data.id}`,
+        `thinking:${data.messageId}`
+      );
       this.createEvent(data);
     });
   }
@@ -123,6 +135,13 @@ export class EventRepository {
       ? `token-part:${JSON.stringify([messageId, event.partId])}`
       : `token:${messageId}`;
     this.upsertEventByMessageId("token", messageId, event, createdAt, id, Boolean(event.partId));
+  }
+
+  upsertThinkingEvent(messageId: string, event: ThinkingEvent, createdAt: number): void {
+    const id = event.partId
+      ? `thinking-part:${JSON.stringify([messageId, event.partId])}`
+      : `thinking:${messageId}`;
+    this.upsertEventByMessageId("thinking", messageId, event, createdAt, id, Boolean(event.partId));
   }
 
   upsertToolCallEvent(messageId: string, event: ToolCallEvent, createdAt: number): void {

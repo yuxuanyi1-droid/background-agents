@@ -66,7 +66,7 @@ describe("EventRepository", () => {
   });
 
   describe("createContextCompactionEvent", () => {
-    it("atomically seals the current token and inserts the compaction marker", () => {
+    it("atomically seals the current text and thinking and inserts the compaction marker", () => {
       repository.createContextCompactionEvent({
         id: "compaction-1",
         type: "context_compacted",
@@ -76,11 +76,13 @@ describe("EventRepository", () => {
       });
 
       expect(transactionSyncCalls).toBe(1);
-      expect(mock.calls).toHaveLength(2);
+      expect(mock.calls).toHaveLength(3);
       expect(mock.calls[0].query).toContain("UPDATE events SET id = ? WHERE id = ?");
       expect(mock.calls[0].params).toEqual(["token:msg-1:compaction-1", "token:msg-1"]);
-      expect(mock.calls[1].query).toContain("INSERT INTO events");
-      expect(mock.calls[1].params).toEqual([
+      expect(mock.calls[1].query).toContain("UPDATE events SET id = ? WHERE id = ?");
+      expect(mock.calls[1].params).toEqual(["thinking:msg-1:compaction-1", "thinking:msg-1"]);
+      expect(mock.calls[2].query).toContain("INSERT INTO events");
+      expect(mock.calls[2].params).toEqual([
         "compaction-1",
         "context_compacted",
         '{"type":"context_compacted"}',
@@ -129,6 +131,45 @@ describe("EventRepository", () => {
       expect(mock.calls[1].params[0]).toBe("token:msg-1");
       expect(mock.calls[1].params[2]).toBe(JSON.stringify(secondEvent));
       expect(mock.calls[1].params[4]).toBe(2000);
+    });
+  });
+
+  describe("upsertThinkingEvent", () => {
+    it("upserts thinking events by deterministic message key", () => {
+      const event = {
+        type: "thinking" as const,
+        content: "reasoning so far",
+        messageId: "msg-1",
+        sandboxId: "sb-1",
+        timestamp: 1,
+      };
+
+      repository.upsertThinkingEvent("msg-1", event, 1000);
+
+      expect(mock.calls[0].query).toContain("ON CONFLICT(id) DO UPDATE SET");
+      expect(mock.calls[0].params).toEqual([
+        "thinking:msg-1",
+        "thinking",
+        JSON.stringify(event),
+        "msg-1",
+        1000,
+      ]);
+    });
+
+    it("keeps each part's thinking in its own row", () => {
+      const event = {
+        type: "thinking" as const,
+        content: "part reasoning",
+        messageId: "msg-1",
+        sandboxId: "sb-1",
+        timestamp: 1,
+        partId: "part-1",
+      };
+
+      repository.upsertThinkingEvent("msg-1", event, 1000);
+
+      expect(mock.calls[0].params[0]).toBe('thinking-part:["msg-1","part-1"]');
+      expect(mock.calls[0].params[1]).toBe("thinking");
     });
   });
 
@@ -499,6 +540,41 @@ describe("EventRepository token persistence", () => {
     expect(repository.listEventPage({ limit: 10, type: "token" }).events[2]).toMatchObject({
       created_at: 110,
       data: JSON.stringify({ ...token, content: "before corrected", partId: "part-1" }),
+    });
+  });
+
+  it("seals the unkeyed thinking on compaction like the text", () => {
+    const thinking = {
+      type: "thinking" as const,
+      content: "hmm",
+      messageId: "msg-1",
+      sandboxId: "sb-1",
+      timestamp: 1,
+    };
+    repository.upsertThinkingEvent("msg-1", thinking, 100);
+    repository.upsertThinkingEvent("msg-1", { ...thinking, content: "hmm ok" }, 110);
+    repository.createContextCompactionEvent({
+      id: "compaction-1",
+      type: "context_compacted",
+      data: '{"type":"context_compacted"}',
+      messageId: "msg-1",
+      createdAt: 120,
+    });
+    // The post-boundary trail starts a new row instead of moving the sealed
+    // one across the marker.
+    repository.upsertThinkingEvent("msg-1", { ...thinking, content: "after" }, 130);
+
+    expect(
+      repository.listEventPage({ limit: 10, type: "thinking" }).events.map((row) => row.id)
+    ).toEqual(["thinking:msg-1", "thinking:msg-1:compaction-1"]);
+    expect(repository.getEventTimelinePage({ limit: 10 }).events.map((row) => row.id)).toEqual([
+      "thinking:msg-1:compaction-1",
+      "compaction-1",
+      "thinking:msg-1",
+    ]);
+    expect(repository.listEventPage({ limit: 10, type: "thinking" }).events[1]).toMatchObject({
+      created_at: 110,
+      data: JSON.stringify({ ...thinking, content: "hmm ok" }),
     });
   });
 });

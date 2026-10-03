@@ -46,7 +46,7 @@ export class SessionSandboxEventProcessor {
   ) {}
 
   async processSandboxEvent(event: SandboxEventWithAck): Promise<void> {
-    if (event.type === "heartbeat" || event.type === "token") {
+    if (event.type === "heartbeat" || event.type === "token" || event.type === "thinking") {
       this.log.debug("Sandbox event", { event_type: event.type });
     } else if (event.type !== "execution_complete") {
       this.log.info("Sandbox event", { event_type: event.type });
@@ -102,6 +102,9 @@ export class SessionSandboxEventProcessor {
         return;
       case "token":
         this.streaming.handleToken(event, context);
+        return;
+      case "thinking":
+        this.streaming.handleThinking(event, context);
         return;
       case "context_compacted":
         this.streaming.handleContextCompacted(event, context);

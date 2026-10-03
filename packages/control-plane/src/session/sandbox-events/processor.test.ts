@@ -68,6 +68,7 @@ function createProcessor(
   };
   const eventRepository = {
     upsertTokenEvent: vi.fn(),
+    upsertThinkingEvent: vi.fn(),
     createContextCompactionEvent: vi.fn(),
     upsertToolCallEvent: vi.fn(),
     createEvent: vi.fn(),
@@ -331,6 +332,26 @@ describe("SessionSandboxEventProcessor", () => {
     await h.processor.processSandboxEvent(event);
 
     expect(h.eventRepository.upsertTokenEvent).toHaveBeenCalledWith(
+      "msg-1",
+      event,
+      expect.any(Number)
+    );
+    expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_event", event });
+  });
+
+  it("persists thinking event and broadcasts it", async () => {
+    const h = createProcessor();
+    const event: SandboxEvent = {
+      type: "thinking",
+      content: "reasoning",
+      messageId: "msg-1",
+      sandboxId: "sb-1",
+      timestamp: 1000,
+    };
+
+    await h.processor.processSandboxEvent(event);
+
+    expect(h.eventRepository.upsertThinkingEvent).toHaveBeenCalledWith(
       "msg-1",
       event,
       expect.any(Number)

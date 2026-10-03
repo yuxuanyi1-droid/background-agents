@@ -608,4 +608,42 @@ describe("POST /internal/sandbox-event", () => {
     expect(events[0].messageId).toBe("msg-order");
     expect(events[0].data.content).toBe("token-2");
   });
+
+  it("multiple thinking events upsert to latest persisted event", async () => {
+    const { stub } = await initSession();
+    const now = Date.now() / 1000;
+
+    // Send 3 thinking events for the same message
+    for (let i = 0; i < 3; i++) {
+      await stub.fetch("http://internal/internal/sandbox-event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "thinking",
+          content: `reasoning-${i}`,
+          messageId: "msg-think",
+          sandboxId: "sb-1",
+          timestamp: now + i,
+        }),
+      });
+    }
+
+    const eventsRes = await stub.fetch(
+      "http://internal/internal/events?type=thinking&message_id=msg-think"
+    );
+    const { events } = await eventsRes.json<{
+      events: Array<{
+        id: string;
+        type: string;
+        data: { content: string };
+        messageId: string;
+        createdAt: number;
+      }>;
+    }>();
+
+    expect(events).toHaveLength(1);
+    expect(events[0].id).toBe("thinking:msg-think");
+    expect(events[0].messageId).toBe("msg-think");
+    expect(events[0].data.content).toBe("reasoning-2");
+  });
 });
