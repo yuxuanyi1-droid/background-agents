@@ -87,6 +87,11 @@ class CliTurnState:
     error: str | None = None
     emitted_error: bool = False
     cost_usd: float | None = None
+    # Cost of the assistant messages that already finished within this turn.
+    # Vendors whose stream reports usage per message (pi) add each finished
+    # message's share here, so the running total in ``cost_usd`` never double
+    # counts the in-flight message's partial usage.
+    cost_committed_usd: float = 0.0
     tokens: dict[str, Any] | None = None
     step_started: bool = False
     completed: bool = False
@@ -1005,8 +1010,20 @@ class CliHarness:
         self._abort_requested = False
         vendor: ResidentCliVendor = self.vendor  # type: ignore[assignment]
         failure: Exception | None = None
+        loop = asyncio.get_running_loop()
+        turn_deadline = loop.time() + budget
+
+        def turn_request_timeout() -> float:
+            # A turn's own request may legitimately take a while — pi's prompt
+            # acknowledgement only lands after its preflight, which can run a
+            # full compaction model call — so it is bounded by the remaining
+            # turn budget, not the fixed protocol default. The floor keeps the
+            # outer budget timeout the one that fires at the deadline, so the
+            # failure reads as the turn's budget rather than a missing reply.
+            return max(turn_deadline - loop.time(), 1.0)
+
         try:
-            async with asyncio.timeout(budget):
+            async with asyncio.timeout_at(turn_deadline):
                 # One setup request at a time, each seeing the latest adopted
                 # id; the cap turns a vendor that never converges into a turn
                 # failure instead of a loop.
@@ -1064,7 +1081,7 @@ class CliHarness:
                     return TurnOutcome.failed(
                         f"The {self.vendor.id.value} conversation could not be started."
                     )
-                response = await server.request(start)
+                response = await server.request(start, timeout=turn_request_timeout())
                 response_failure = _response_error(response)
                 if response_failure is not None and vendor.turn_start_busy_failure(
                     response_failure
@@ -1076,7 +1093,7 @@ class CliHarness:
                     # settled turn, so they are dropped, and the start is
                     # resubmitted once it is over.
                     await self._drop_until_previous_run_settled(server, vendor)
-                    response = await server.request(start)
+                    response = await server.request(start, timeout=turn_request_timeout())
                     response_failure = _response_error(response)
                 if response_failure is not None:
                     return TurnOutcome.failed(

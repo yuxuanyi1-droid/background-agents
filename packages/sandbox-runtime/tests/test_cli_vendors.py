@@ -7,7 +7,7 @@ import pytest
 
 from sandbox_runtime.custom_providers import codex_model_catalog_path, load_custom_providers
 from sandbox_runtime.harness.base import HarnessId, TurnOutcome
-from sandbox_runtime.harness.cli_harness import CliTurnSettled, CliTurnState
+from sandbox_runtime.harness.cli_harness import CliTurnSettled, CliTurnState, step_finish_event
 from sandbox_runtime.harness.cli_vendors import (
     CodexVendor,
     PiVendor,
@@ -1224,6 +1224,140 @@ class TestPi:
             state,
         )
         assert state.error is None
+
+    def test_length_stop_does_not_arm_the_settle_grace(self) -> None:
+        # A "length" stop is recovered by pi's own overflow compaction, which
+        # continues the same run (agent.continue) before it settles, so the
+        # settle grace must not start there — only a plain "stop" is final.
+        vendor = PiVendor()
+        state = _state()
+        vendor.parse_record(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Truncated."}],
+                    "stopReason": "length",
+                },
+            },
+            state,
+        )
+        assert state.final_message_seen_at is None
+
+        vendor.parse_record(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Truncated, then done."}],
+                    "stopReason": "stop",
+                },
+            },
+            state,
+        )
+        assert state.final_message_seen_at is not None
+
+    def test_cost_and_tokens_accumulate_across_messages(self) -> None:
+        # Pi reports usage per assistant message and one turn spans several of
+        # them (the tool loop), so each finished message's cost and tokens add
+        # onto the turn total; an in-flight message's partial usage may only
+        # be a running total on top of what is already committed.
+        vendor = PiVendor()
+        state = _state()
+        vendor.parse_record(
+            {
+                "type": "message_update",
+                "usage": {"cost": {"total": 0.02}},
+                "assistantMessageEvent": {"type": "text_delta", "delta": "one"},
+            },
+            state,
+        )
+        assert state.cost_usd == 0.02
+
+        vendor.parse_record(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "one"}],
+                    "stopReason": "toolUse",
+                    "usage": {
+                        "input": 100,
+                        "output": 30,
+                        "cacheRead": 40,
+                        "cacheWrite": 10,
+                        "reasoning": 12,
+                        "totalTokens": 180,
+                        "cost": {
+                            "input": 0.01,
+                            "output": 0.005,
+                            "cacheRead": 0.004,
+                            "cacheWrite": 0.001,
+                            "total": 0.02,
+                        },
+                    },
+                },
+            },
+            state,
+        )
+        assert state.cost_usd == 0.02
+        assert state.tokens == {
+            "input": 100,
+            "output": 30,
+            "reasoning": 12,
+            "cache": {"read": 40, "write": 10},
+            "total": 180,
+        }
+
+        # The next message's partial builds on the committed total...
+        vendor.parse_record(
+            {
+                "type": "message_update",
+                "usage": {"cost": {"total": 0.015}},
+                "assistantMessageEvent": {"type": "text_delta", "delta": "two"},
+            },
+            state,
+        )
+        assert state.cost_usd == pytest.approx(0.035)
+        # ...and its end replaces the partial with the authoritative figures.
+        vendor.parse_record(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "one two"}],
+                    "stopReason": "stop",
+                    "usage": {
+                        "input": 50,
+                        "output": 10,
+                        "cacheRead": 0,
+                        "cacheWrite": 0,
+                        "reasoning": 3,
+                        "totalTokens": 60,
+                        "cost": {
+                            "input": 0.02,
+                            "output": 0.008,
+                            "cacheRead": 0.0,
+                            "cacheWrite": 0.0,
+                            "total": 0.03,
+                        },
+                    },
+                },
+            },
+            state,
+        )
+        assert state.cost_usd == pytest.approx(0.05)
+        assert state.tokens == {
+            "input": 150,
+            "output": 40,
+            "reasoning": 15,
+            "cache": {"read": 40, "write": 10},
+            "total": 240,
+        }
+        # The settled step carries the whole turn in the canonical shape.
+        finish = step_finish_event(state, reason="completed")
+        assert finish["tokens"] == state.tokens
+        assert finish["cost"] == pytest.approx(0.05)
 
     def test_exit_outcome(self) -> None:
         assert PiVendor().exit_outcome(_state(), 0, "") == TurnOutcome.failed(

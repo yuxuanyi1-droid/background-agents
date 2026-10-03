@@ -832,6 +832,44 @@ async def test_pi_busy_prompt_waits_for_the_previous_run_and_resubmits(tmp_path:
     await harness.close()
 
 
+@pytest.mark.asyncio
+async def test_turn_start_requests_are_bounded_by_the_remaining_turn_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Pi's prompt acknowledgement lands only after its preflight, which can run
+    # a full compaction model call, so the turn's own requests ride what is
+    # left of the turn budget instead of the fixed protocol timeout. Setup
+    # requests (a pure protocol op) keep the default.
+    recorded: list[float | None] = []
+    original = cli_harness._ResidentServer.request
+
+    async def recording_request(
+        server: Any, payload: dict[str, Any], timeout: float | None = None
+    ) -> dict[str, Any]:
+        recorded.append(timeout)
+        return await original(server, payload, timeout)
+
+    monkeypatch.setattr(cli_harness._ResidentServer, "request", recording_request)
+
+    harness = _harness(_ScriptedPiVendor(_PI_BUSY_SERVER), tmp_path)
+    await harness.create_session()
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    outcome = await harness.run_prompt(
+        HarnessPrompt(message_id="m1", text="hi", max_duration_seconds=120.0), emit
+    )
+    assert outcome.success, outcome.error
+    # get_state (setup), then the rejected prompt and its resubmission.
+    assert recorded[0] is None
+    assert recorded[1] is not None and 100.0 < recorded[1] <= 120.0
+    # The resubmission recomputes against the deadline, so it may only shrink.
+    assert recorded[2] is not None and 100.0 < recorded[2] <= recorded[1]
+    await harness.close()
+
+
 def _vendor_shim(tmp_path: Path, name: str) -> Path:
     """An executable named like a vendor CLI, the shape an npm bin shim has."""
     shim = tmp_path / name

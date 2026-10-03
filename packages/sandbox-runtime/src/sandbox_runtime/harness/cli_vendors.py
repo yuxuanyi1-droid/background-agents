@@ -732,9 +732,12 @@ class PiVendor:
     def _message_update(self, record: dict[str, Any], state: CliTurnState) -> list[Any]:
         usage = record.get("usage")
         if isinstance(usage, dict):
-            cost = usage.get("cost")
-            if isinstance(cost, dict) and isinstance(cost.get("total"), (int, float)):
-                state.cost_usd = float(cost["total"])
+            cost = _pi_message_cost(usage)
+            if cost is not None:
+                # Pi's usage is per message, so the running total builds on the
+                # messages that already finished; the commit happens on the
+                # message's end, which is authoritative for it.
+                state.cost_usd = state.cost_committed_usd + cost
         event = record.get("assistantMessageEvent")
         if not isinstance(event, dict):
             return []
@@ -778,11 +781,12 @@ class PiVendor:
             detail = str(message.get("errorMessage") or "Pi reported a provider error")
             events += error_event(state, detail)
         elif stop_reason not in (None, "aborted", "pending"):
-            # A response that leaves tool calls to run ("toolUse") is not the
-            # final answer — pi keeps going while tools execute — so the
-            # settle grace must not start on it, or a tool that outlives the
-            # grace settles the turn before its answer exists.
-            if not _pi_has_tool_calls(message):
+            # Only a plain "stop" is the final answer. A "length" stop is
+            # recovered by pi's own overflow compaction, which continues the
+            # same run before it settles, and a "toolUse" message leaves tools
+            # to execute — neither may start the settle grace, or the turn
+            # settles before the answer exists.
+            if stop_reason == "stop" and not _pi_has_tool_calls(message):
                 state.final_message_seen_at = time.monotonic()
             if state.error:
                 # Any completed response after a failed one means pi recovered
@@ -796,9 +800,16 @@ class PiVendor:
             events += text_events(state, final_text)
         usage = message.get("usage")
         if isinstance(usage, dict):
-            cost = usage.get("cost")
-            if isinstance(cost, dict) and isinstance(cost.get("total"), (int, float)):
-                state.cost_usd = float(cost["total"])
+            # Pi reports usage per assistant message and one turn spans several
+            # of them (the tool loop), so this message's cost and tokens are
+            # added onto the turn total rather than replacing it.
+            cost = _pi_message_cost(usage)
+            if cost is not None:
+                state.cost_committed_usd += cost
+                state.cost_usd = state.cost_committed_usd
+            tokens = _usage_tokens(usage)
+            if tokens:
+                state.tokens = _merged_usage_tokens(state.tokens, tokens)
         return events
 
     def exit_outcome(
@@ -1154,6 +1165,15 @@ def _pi_result_text(result: Any) -> str:
     return _as_text(result)
 
 
+def _pi_message_cost(usage: dict[str, Any] | None) -> float | None:
+    """The USD cost pi attributes to one assistant message, if it reported one."""
+    cost = usage.get("cost") if isinstance(usage, dict) else None
+    total = cost.get("total") if isinstance(cost, dict) else None
+    if isinstance(total, (int, float)) and not isinstance(total, bool):
+        return float(total)
+    return None
+
+
 # Vendors report usage with different flat key styles (codex snake_case, pi
 # camelCase); each canonical count maps to its known spellings in preference
 # order. ``total`` is the vendor's own turn total where it reports one.
@@ -1203,6 +1223,36 @@ def _usage_tokens(usage: dict[str, Any]) -> dict[str, Any]:
     if "total" in picks:
         tokens["total"] = picks["total"]
     return tokens
+
+
+def _merged_usage_tokens(base: dict[str, Any] | None, addition: dict[str, Any]) -> dict[str, Any]:
+    """Sum two canonical usage dicts (the shape ``_usage_tokens`` returns).
+
+    Vendors whose stream reports usage per message need a turn total, and the
+    counts are additive; a count either side carries is kept, even at zero.
+    """
+
+    def pick(source: dict[str, Any] | None, path: tuple[str, ...]) -> int | None:
+        value: Any = source
+        for step in path:
+            if not isinstance(value, dict):
+                return None
+            value = value.get(step)
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    merged: dict[str, Any] = {}
+    for key in ("input", "output", "reasoning", "total"):
+        parts = (pick(base, (key,)), pick(addition, (key,)))
+        if any(part is not None for part in parts):
+            merged[key] = sum(part or 0 for part in parts)
+    cache: dict[str, int] = {}
+    for key in ("read", "write"):
+        parts = (pick(base, ("cache", key)), pick(addition, ("cache", key)))
+        if any(part is not None for part in parts):
+            cache[key] = sum(part or 0 for part in parts)
+    if cache:
+        merged["cache"] = cache
+    return merged
 
 
 def _error_text(value: Any) -> str:
