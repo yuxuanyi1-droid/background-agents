@@ -303,6 +303,20 @@ class CodexVendor:
     def server_request_messages(self, message: dict[str, Any]) -> list[dict[str, Any]]:
         return _jsonrpc_unattended_reply(message)
 
+    # --- Failure recovery ---------------------------------------------------
+
+    def setup_lock_contention(self, failure: str) -> bool:
+        # A per-thread rollout writer lock is held for the thread's live
+        # lifetime in one process; this rejection means another app-server
+        # (an orphan this bridge never reaped) still owns the thread.
+        return "already has an active writer" in failure
+
+    def turn_start_busy_failure(self, failure: str) -> bool:
+        return False
+
+    def previous_run_settled(self, message: dict[str, Any]) -> bool:
+        return False
+
     def _exec_record(self, message: dict[str, Any]) -> dict[str, Any]:
         """Adapt one JSON-RPC notification to the ``exec --json`` record shape
         the one-shot parser consumes."""
@@ -597,6 +611,21 @@ class PiVendor:
         if message.get("type") == "extension_ui_request" and isinstance(message.get("id"), str):
             return [{"type": "extension_ui_response", "id": message["id"], "cancelled": True}]
         return []
+
+    # --- Failure recovery ---------------------------------------------------
+
+    def setup_lock_contention(self, failure: str) -> bool:
+        return False
+
+    def turn_start_busy_failure(self, failure: str) -> bool:
+        # Raised while the previous run has not truly ended: it is still
+        # streaming, or compacting inside the run.
+        return "already processing" in failure or "compaction is in progress" in failure
+
+    def previous_run_settled(self, message: dict[str, Any]) -> bool:
+        # agent_settled is pi's true end of run: emitted only once the run's
+        # retries, compactions, and queued messages have all drained.
+        return message.get("type") == "agent_settled"
 
     def parse_record(self, record: dict[str, Any], state: CliTurnState) -> list[Any]:
         kind = record.get("type")
@@ -955,6 +984,17 @@ class ZcodeVendor:
             # error frame would instead reject the broker's promise.
             return [{"id": request_id, "result": {"action": "cancel"}}]
         return [_jsonrpc_unattended_reply_error(request_id, method)]
+
+    # --- Failure recovery ---------------------------------------------------
+
+    def setup_lock_contention(self, failure: str) -> bool:
+        return False
+
+    def turn_start_busy_failure(self, failure: str) -> bool:
+        return False
+
+    def previous_run_settled(self, message: dict[str, Any]) -> bool:
+        return False
 
     def parse_record(self, record: dict[str, Any], state: CliTurnState) -> list[Any]:
         return []

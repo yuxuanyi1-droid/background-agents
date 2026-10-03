@@ -25,7 +25,7 @@ from sandbox_runtime.harness.cli_harness import (
     append_text_events,
     step_start_events,
 )
-from sandbox_runtime.harness.cli_vendors import PiVendor
+from sandbox_runtime.harness.cli_vendors import CodexVendor, PiVendor
 
 
 class _ScriptedVendor:
@@ -250,6 +250,17 @@ class _ResidentScriptVendor(_ScriptedVendor):
         if isinstance(request_id, str) and isinstance(message.get("method"), str):
             return [{"id": request_id, "result": {}}]
         return []
+
+    # No vendor-specific failure recovery in the scripted dialect: a rejected
+    # setup or turn-start request is final.
+    def setup_lock_contention(self, failure: str) -> bool:
+        return False
+
+    def turn_start_busy_failure(self, failure: str) -> bool:
+        return False
+
+    def previous_run_settled(self, message: dict[str, Any]) -> bool:
+        return False
 
 
 _SERVER_HEAD = (
@@ -647,4 +658,187 @@ async def test_pi_tool_message_does_not_settle_the_turn_mid_step(tmp_path: Path)
     assert outcome.success, outcome.error
     tokens = [e["content"] for e in events if e["type"] == "token"]
     assert tokens == ["The build passed."]
+    await harness.close()
+
+
+# A pi rpc server whose prompt arrives while the previous run is still live:
+# pi rejects it without a streamingBehavior, the run's tail then drains, and
+# only the resubmitted prompt may be answered.
+_PI_BUSY_SERVER = (
+    "import json, sys, time\n"
+    "def send(obj):\n"
+    "    print(json.dumps(obj), flush=True)\n"
+    "busy = True\n"
+    "for line in sys.stdin:\n"
+    "    message = json.loads(line)\n"
+    "    kind = message.get('type')\n"
+    "    if kind == 'get_state':\n"
+    "        send({'id': message['id'], 'type': 'response', 'command': 'get_state',"
+    " 'success': True, 'data': {'sessionId': 'p-1'}})\n"
+    "    elif kind == 'prompt':\n"
+    "        if busy:\n"
+    "            busy = False\n"
+    "            send({'id': message['id'], 'type': 'response', 'command': 'prompt',"
+    " 'success': False, 'error': \"Agent is already processing. Specify"
+    " streamingBehavior ('steer' or 'followUp') to queue the message.\"})\n"
+    "            send({'type': 'message_end', 'message': {'role': 'assistant',"
+    " 'stopReason': 'stop', 'content': [{'type': 'text',"
+    " 'text': 'stale previous run answer'}]}})\n"
+    "            time.sleep(0.2)\n"
+    "            send({'type': 'agent_settled'})\n"
+    "        else:\n"
+    "            send({'id': message['id'], 'type': 'response', 'command': 'prompt',"
+    " 'success': True})\n"
+    "            send({'type': 'message_end', 'message': {'role': 'assistant',"
+    " 'stopReason': 'stop', 'content': [{'type': 'text', 'text': 'The fresh answer.'}]}})\n"
+    "            send({'type': 'agent_settled'})\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_pi_busy_prompt_waits_for_the_previous_run_and_resubmits(tmp_path: Path) -> None:
+    harness = _harness(_ScriptedPiVendor(_PI_BUSY_SERVER), tmp_path)
+    await harness.create_session()
+    outcome, events = await _run(harness)
+    assert outcome.success, outcome.error
+    # The rejection's tail belongs to the turn that already settled and must
+    # be dropped; only the resubmitted prompt's answer reaches the client.
+    tokens = [e["content"] for e in events if e["type"] == "token"]
+    assert tokens == ["The fresh answer."]
+    await harness.close()
+
+
+def _vendor_shim(tmp_path: Path, name: str) -> Path:
+    """An executable named like a vendor CLI, the shape an npm bin shim has."""
+    shim = tmp_path / name
+    shim.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(600)\n")
+    shim.chmod(0o755)
+    return shim
+
+
+@pytest.mark.asyncio
+async def test_orphan_sweep_matches_the_shim_shape_and_spares_other_processes(
+    tmp_path: Path,
+) -> None:
+    # The install execs npm shims, so the process shows the shim path after
+    # the interpreter — never the bare binary name a prefix match requires —
+    # and the sweep must only claim processes whose argv names this vendor.
+    import subprocess
+
+    orphan = subprocess.Popen(
+        [str(_vendor_shim(tmp_path, "sweeptool")), "serve", "--forever"],
+        stdin=subprocess.PIPE,
+    )
+    bystander = subprocess.Popen(
+        [str(_vendor_shim(tmp_path, "othertool")), "serve", "--forever"],
+        stdin=subprocess.PIPE,
+    )
+    try:
+        killed = await cli_harness.kill_orphaned_resident_servers(
+            "sweeptool", ["serve", "--forever"]
+        )
+        assert orphan.pid in killed
+        assert bystander.pid not in killed
+        assert orphan.wait(timeout=5) == -signal.SIGKILL
+        assert bystander.poll() is None
+    finally:
+        bystander.kill()
+        bystander.wait(timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_resident_kill_stops_the_whole_server_process_group(tmp_path: Path) -> None:
+    # Codex's npm launcher spawns the native app-server as its child and
+    # forwards only SIGINT/SIGTERM/SIGHUP; killing the launcher alone would
+    # leave the real server — holding the conversation's writer lock —
+    # running.
+    child_pid_file = tmp_path / "child.pid"
+    script = (
+        "import json, subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'])\n"
+        f"open({str(child_pid_file)!r}, 'w').write(str(child.pid))\n"
+        "def send(obj):\n"
+        "    print(json.dumps(obj), flush=True)\n"
+        "for line in sys.stdin:\n"
+        "    message = json.loads(line)\n"
+        "    kind = message.get('type')\n"
+        "    if kind == 'ensure':\n"
+        "        send({'id': message['id'], 'result': {'session': 's-1'}})\n"
+        "    elif kind == 'prompt':\n"
+        "        send({'id': message['id'], 'result': {'accepted': True}})\n"
+        "        send({'type': 'delta', 'text': 'ok'})\n"
+        "        send({'type': 'done'})\n"
+    )
+    harness = _harness(_ResidentScriptVendor(script), tmp_path)
+    await harness.create_session()
+    outcome, _ = await _run(harness)
+    assert outcome.success
+    child_pid = int(child_pid_file.read_text())
+    assert not cli_harness._process_reaped(child_pid)
+    await harness.close()
+    deadline = asyncio.get_running_loop().time() + 5
+    while not cli_harness._process_reaped(child_pid):
+        assert asyncio.get_running_loop().time() < deadline, "server child survived the kill"
+        await asyncio.sleep(0.05)
+
+
+class _ScriptedCodexVendor(CodexVendor):
+    """CodexVendor over a scripted server that speaks the app-server dialect."""
+
+    def __init__(self, script: str) -> None:
+        super().__init__()
+        self.binary = sys.executable
+        self._script = script
+
+    def server_argv(
+        self,
+        *,
+        session_id: str | None,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> list[str]:
+        return ["-c", self._script]
+
+
+def _codex_lock_server(requests_log: Path) -> str:
+    return (
+        "import json, sys\n"
+        "def send(obj):\n"
+        "    print(json.dumps(obj), flush=True)\n"
+        "resumed = False\n"
+        "for line in sys.stdin:\n"
+        "    message = json.loads(line)\n"
+        "    method = message.get('method')\n"
+        f"    open({str(requests_log)!r}, 'a').write(str(method) + '\\n')\n"
+        "    if method == 'initialize':\n"
+        "        send({'id': message['id'], 'result': {}})\n"
+        "    elif method == 'thread/resume':\n"
+        "        if not resumed:\n"
+        "            resumed = True\n"
+        "            send({'id': message['id'], 'error': {'code': -32603, 'message':"
+        " 'thread %s already has an active writer' % message['params']['threadId']}})\n"
+        "        else:\n"
+        "            send({'id': message['id'], 'result':"
+        " {'thread': {'id': message['params']['threadId']}}})\n"
+        "    elif method == 'turn/start':\n"
+        "        send({'id': message['id'], 'result': {}})\n"
+        "        send({'method': 'item/completed', 'params': {'item': {'id': 'i-1',"
+        " 'type': 'agentMessage', 'text': 'Done.'}}})\n"
+        "        send({'method': 'turn/completed', 'params': {'turn': {'id': 't-1'}}})\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_codex_resume_lock_contention_sweeps_and_retries(tmp_path: Path) -> None:
+    # "Already has an active writer" means another live app-server owns the
+    # thread; the resume is retried after the sweep, which must spare the
+    # server that could not take the lock (it is not the holder). A persisted
+    # id (resume_session) is what makes the first turn send thread/resume.
+    requests_log = tmp_path / "requests.log"
+    harness = _harness(_ScriptedCodexVendor(_codex_lock_server(requests_log)), tmp_path)
+    await harness.resume_session("chosen-1")
+    outcome, _ = await _run(harness)
+    assert outcome.success, outcome.error
+    assert harness.session_id == "chosen-1"
+    assert requests_log.read_text().splitlines().count("thread/resume") == 2
     await harness.close()

@@ -51,6 +51,11 @@ if TYPE_CHECKING:
 
 STDERR_TAIL_CHARS = 2000
 KILL_GRACE_SECONDS = 5.0
+# How long a sweep gives SIGKILLed processes to finish tearing down (which is
+# when their conversation locks actually free) before the awaiting request
+# retries anyway.
+KILL_SETTLE_SECONDS = 2.0
+KILL_SETTLE_POLL_SECONDS = 0.05
 # Vendor setup chains are short — create/resume then subscribe, or state then
 # model then thinking — so this cap only exists to turn a non-converging
 # vendor into a failed turn instead of a loop.
@@ -259,6 +264,25 @@ class ResidentCliVendor(Protocol):
     settle event can be late or lost in a post-turn hang. Zero (default)
     disables it: only the vendor's terminal notification settles."""
 
+    def setup_lock_contention(self, failure: str) -> bool:
+        """Whether a failed setup request means another live process holds
+        the conversation's writer lock. The harness kills the holder and
+        retries the request once; any other failure is final."""
+        ...
+
+    def turn_start_busy_failure(self, failure: str) -> bool:
+        """Whether a rejected turn start means the vendor is still finishing
+        the previous run. The harness waits for that run to end, then
+        resubmits the start once; any other failure is final."""
+        ...
+
+    def previous_run_settled(self, message: dict[str, Any]) -> bool:
+        """Whether a notification observed while recovering from a busy turn
+        start marks the previous run's true end — the point a fresh prompt is
+        accepted again. Its preceding tail belongs to the turn that already
+        settled and is discarded."""
+        ...
+
 
 @runtime_checkable
 class CliVendor(Protocol):
@@ -339,17 +363,55 @@ class CliServerDied(Exception):
 _SERVER_EXITED = object()
 
 
-def _resident_server_signature(vendor: ResidentCliVendor) -> list[str]:
-    """The argv prefix every server process of this vendor carries. Called
-    with no session or model so vendors that take spawn-time routing (Pi)
-    return their static form."""
-    return [
-        vendor.binary,
-        *vendor.server_argv(session_id=None, model=None, reasoning_effort=None),
-    ]
+def _resident_server_args(vendor: ResidentCliVendor) -> list[str]:
+    """The static server argv of this vendor: the arguments that start the
+    protocol server, called with no session or model so vendors that take
+    spawn-time routing (Pi) return their static form."""
+    return vendor.server_argv(session_id=None, model=None, reasoning_effort=None)
 
 
-def kill_orphaned_resident_servers(signature: list[str]) -> list[int]:
+def _starts_vendor_server(args: list[str], binary: str, server_args: list[str]) -> bool:
+    """Whether a process's argv belongs to this vendor's protocol server.
+
+    The binary reaches the process through whatever the install left in
+    PATH: the sandbox installs the npm packages into a local tree, so the
+    kernel execs the ``.bin`` shim — a symlink that keeps its own name — and
+    the process shows ``node /opt/.../bin/codex app-server``; Codex's node
+    launcher then spawns the native app-server at an absolute path showing
+    ``/opt/.../codex app-server``. So the match is: some argument names the
+    vendor CLI (the shim, the native binary, or the bin script directly) and
+    the vendor's server arguments directly follow it.
+    """
+    if not server_args:
+        return False
+    name = Path(binary).name
+    names = {name, f"{name}.js", f"{name}.cjs"}
+    for index, argument in enumerate(args):
+        if Path(argument).name not in names:
+            continue
+        if args[index + 1 : index + 1 + len(server_args)] == server_args:
+            return True
+    return False
+
+
+def _process_reaped(pid: int) -> bool:
+    """Whether a killed process has finished tearing down (gone or a zombie).
+
+    File locks are released during teardown, before the zombie state, so both
+    count as "the lock is free" — and a zombie still has a /proc entry until
+    its parent reaps it, which must not hold up the wait.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_bytes()
+    except OSError:
+        return True
+    close = stat.rfind(b")")
+    return close != -1 and stat[close + 2 : close + 3] == b"Z"
+
+
+async def kill_orphaned_resident_servers(
+    binary: str, server_args: list[str], *, exclude_pgid: int | None = None
+) -> list[int]:
     """SIGKILL resident server processes this harness does not own.
 
     A resident server is spawned with ``start_new_session`` so a bridge crash
@@ -359,6 +421,10 @@ def kill_orphaned_resident_servers(signature: list[str]) -> list[int]:
     rejected with "already has an active writer" until the orphan dies. One
     sandbox runs one session, so any matching process that is not the server
     this harness is about to start is an orphan.
+
+    ``exclude_pgid`` spares one process group — the live server's own when
+    the sweep runs mid-turn: the server that could not take a conversation
+    lock is not the process holding it.
     """
     killed: list[int] = []
     mine = os.getpid()
@@ -372,19 +438,62 @@ def kill_orphaned_resident_servers(signature: list[str]) -> list[int]:
         pid = int(entry.name)
         if pid == mine:
             continue
+        if exclude_pgid is not None:
+            try:
+                if os.getpgid(pid) == exclude_pgid:
+                    continue
+            except OSError:
+                continue
         try:
             argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
         except OSError:
             continue
         args = [part.decode("utf-8", "replace") for part in argv if part]
-        if len(args) < len(signature) or args[: len(signature)] != signature:
+        if not _starts_vendor_server(args, binary, server_args):
             continue
         try:
             os.kill(pid, signal.SIGKILL)
             killed.append(pid)
         except OSError:
             continue
+    if killed:
+        # The resume that prompted the sweep must not race the kill: a
+        # process's file locks are released only once it has torn down.
+        deadline = time.monotonic() + KILL_SETTLE_SECONDS
+        while not all(_process_reaped(pid) for pid in killed):
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(KILL_SETTLE_POLL_SECONDS)
     return killed
+
+
+async def _terminate_process(process: asyncio.subprocess.Process) -> None:
+    """Stop a spawned process and its whole session group.
+
+    Every server is spawned with ``start_new_session`` so a bridge crash
+    cannot take it down — which also means signalling the direct child is not
+    enough. Codex's npm launcher spawns the native app-server as its child
+    and forwards only SIGINT/SIGTERM/SIGHUP, so killing the launcher alone
+    would leave the real server — the one holding the conversation's writer
+    lock — running.
+    """
+    if process.returncode is not None:
+        return
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        with contextlib.suppress(ProcessLookupError):
+            process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), KILL_GRACE_SECONDS)
+    except TimeoutError:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(process.wait(), KILL_GRACE_SECONDS)
 
 
 class _ResidentServer:
@@ -427,6 +536,17 @@ class _ResidentServer:
         """Why the stdout reader stopped without a server exit, if it did."""
         return self._reader_error
 
+    @property
+    def pgid(self) -> int | None:
+        """The server's process-group id (its own session), while it runs."""
+        process = self._process
+        if process is None:
+            return None
+        try:
+            return os.getpgid(process.pid)
+        except OSError:
+            return None
+
     async def start(
         self,
         workdir: Path,
@@ -438,8 +558,9 @@ class _ResidentServer:
         assert self._process is None
         # A previous server this bridge never reaped may still hold the
         # conversation's locks; clear it before it can reject our resume.
-        signature = _resident_server_signature(self._vendor)
-        killed = kill_orphaned_resident_servers(signature)
+        killed = await kill_orphaned_resident_servers(
+            self._vendor.binary, _resident_server_args(self._vendor)
+        )
         if killed:
             self._log.info(
                 f"{self._vendor.id.value}.server.orphan_sweep",
@@ -586,10 +707,7 @@ class _ResidentServer:
                 task.cancel()
         self._reader_task = None
         self._stderr_task = None
-        if process.returncode is None:
-            process.kill()
-            with contextlib.suppress(ProcessLookupError):
-                await process.wait()
+        await _terminate_process(process)
 
 
 class CliHarness:
@@ -649,7 +767,7 @@ class CliHarness:
             await self._server.kill()
             self._server = None
         if self._process is not None:
-            await self._kill(self._process)
+            await _terminate_process(self._process)
 
     async def resume_session(self, persisted_id: str) -> bool:
         # These CLIs resolve a prior conversation from their own on-disk store;
@@ -734,14 +852,14 @@ class CliHarness:
                 if isinstance(error, CliPromptTimeout)
                 else CliPromptTimeout("The turn exceeded its time budget.")
             )
-            await self._kill(process)
+            await _terminate_process(process)
             returncode = process.returncode
         except CliInactivityTimeout as error:
             timeout_error = error
-            await self._kill(process)
+            await _terminate_process(process)
             returncode = process.returncode
         except asyncio.CancelledError:
-            await self._kill(process)
+            await _terminate_process(process)
             raise
         finally:
             self._process = None
@@ -793,6 +911,7 @@ class CliHarness:
                 # One setup request at a time, each seeing the latest adopted
                 # id; the cap turns a vendor that never converges into a turn
                 # failure instead of a loop.
+                recovered_contention = False
                 for _ in range(SETUP_REQUEST_LIMIT):
                     message = vendor.next_setup_message(
                         session_id=self.session_id,
@@ -805,6 +924,17 @@ class CliHarness:
                         break
                     response = await server.request(message)
                     failure = _response_error(response)
+                    if (
+                        failure is not None
+                        and not recovered_contention
+                        and vendor.setup_lock_contention(failure)
+                    ):
+                        # Another live process still owns the conversation
+                        # (an orphan this bridge never reaped); the request
+                        # can only succeed once it is dead.
+                        recovered_contention = True
+                        response = await self._sweep_lock_holder_and_retry(server, message)
+                        failure = _response_error(response)
                     if failure is not None:
                         return TurnOutcome.failed(
                             f"{_request_label(message)}: {failure}",
@@ -837,6 +967,16 @@ class CliHarness:
                     )
                 response = await server.request(start)
                 failure = _response_error(response)
+                if failure is not None and vendor.turn_start_busy_failure(failure):
+                    # The previous turn settled on its final answer while the
+                    # vendor was still finishing run work (a retry, a
+                    # compaction); it rejects a new prompt until that run
+                    # truly ends. The run's remaining events belong to the
+                    # settled turn, so they are dropped, and the start is
+                    # resubmitted once it is over.
+                    await self._drop_until_previous_run_settled(server, vendor)
+                    response = await server.request(start)
+                    failure = _response_error(response)
                 if failure is not None:
                     return TurnOutcome.failed(
                         f"{_request_label(start)}: {failure}",
@@ -892,18 +1032,8 @@ class CliHarness:
                     # that exits immediately after delivering it (observed on
                     # pi 0.87.1) must not fail a complete turn.
                     return
-                code, tail = await server.exit_details()
-                reader_error = server.reader_error
-                if reader_error:
-                    detail = (
-                        f"The {self.id.value} protocol server stream failed mid-turn "
-                        f"({reader_error}); the server process was still running."
-                    )
-                else:
-                    detail = f"The {self.id.value} protocol server exited mid-turn (code {code})."
-                if tail:
-                    detail += f" Stderr tail: {tail[-STDERR_TAIL_CHARS:]}"
-                raise CliServerDied(detail)
+                error = await self._server_death_error(server)
+                raise error
             # Reverse requests were already answered by the reader; here they
             # only feed the vendor's translation.
             try:
@@ -914,6 +1044,68 @@ class CliHarness:
                 return
             for event in events:
                 await emit(event)
+
+    async def _drop_until_previous_run_settled(
+        self, server: _ResidentServer, vendor: ResidentCliVendor
+    ) -> None:
+        """Discard a settled turn's trailing notifications until the vendor
+        reports its run truly over.
+
+        A busy turn start means the previous run was still live when that
+        turn settled; everything it emits from then on belongs to the turn
+        the client already has the answer for, and only the vendor's
+        end-of-run notification means a fresh prompt will be accepted.
+        """
+        while True:
+            message = await server.next_notification(self.limits.inactivity_timeout_seconds)
+            if message is None:
+                raise CliInactivityTimeout(
+                    f"No output for {self.limits.inactivity_timeout_seconds:.0f}s while "
+                    f"the {self.id.value} agent finished its previous run."
+                )
+            if message is _SERVER_EXITED:
+                error = await self._server_death_error(server)
+                raise error
+            if vendor.previous_run_settled(message):
+                return
+
+    async def _sweep_lock_holder_and_retry(
+        self, server: _ResidentServer, message: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Kill the process holding the conversation's lock, then retry the
+        setup request that the lock rejection failed.
+
+        The sweep spares the live server's own process group: the server
+        that could not take the lock is not the process holding it.
+        """
+        vendor: ResidentCliVendor = self.vendor  # type: ignore[assignment]
+        killed = await kill_orphaned_resident_servers(
+            self.vendor.binary,
+            _resident_server_args(vendor),
+            exclude_pgid=server.pgid,
+        )
+        if killed:
+            self.log.info(
+                f"{self.vendor.id.value}.server.lock_sweep",
+                killed_pids=killed,
+            )
+        return await server.request(message)
+
+    async def _server_death_error(self, server: _ResidentServer) -> CliServerDied:
+        """The failure describing a server that died mid-turn, naming a
+        reader failure (the process may still be running) over an exit."""
+        code, tail = await server.exit_details()
+        reader_error = server.reader_error
+        if reader_error:
+            detail = (
+                f"The {self.id.value} protocol server stream failed mid-turn "
+                f"({reader_error}); the server process was still running."
+            )
+        else:
+            detail = f"The {self.id.value} protocol server exited mid-turn (code {code})."
+        if tail:
+            detail += f" Stderr tail: {tail[-STDERR_TAIL_CHARS:]}"
+        return CliServerDied(detail)
 
     async def _consume_jsonl(
         self, stream: asyncio.StreamReader, state: CliTurnState, emit: EventSink
@@ -957,7 +1149,7 @@ class CliHarness:
         self._abort_requested = True
         if self._process is None:
             return False
-        await self._kill(self._process)
+        await _terminate_process(self._process)
         return True
 
     async def stop_execution(self, timeout_seconds: float) -> bool:
@@ -983,29 +1175,10 @@ class CliHarness:
             return True
         try:
             async with asyncio.timeout(max(timeout_seconds, 0.0)):
-                await self._kill(process)
+                await _terminate_process(process)
         except TimeoutError:
             return False
         return process.returncode is not None
-
-    async def _kill(self, process: asyncio.subprocess.Process) -> None:
-        if process.returncode is not None:
-            return
-        try:
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            with contextlib.suppress(ProcessLookupError):
-                process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), KILL_GRACE_SECONDS)
-        except TimeoutError:
-            try:
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                with contextlib.suppress(ProcessLookupError):
-                    process.kill()
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(process.wait(), KILL_GRACE_SECONDS)
 
 
 def _response_error(response: dict[str, Any]) -> str | None:

@@ -212,6 +212,18 @@ class TestCodexAppServer:
         assert reply["error"]["code"] == -32601
         assert vendor.server_request_messages({"method": "turn/started"}) == []
 
+    def test_writer_lock_rejection_is_recognized(self) -> None:
+        # rollout's writer lock is held for the thread's live lifetime by one
+        # app-server process; a resume reaching another process's lock is the
+        # recoverable contention the harness sweeps for.
+        vendor = CodexVendor()
+        assert vendor.setup_lock_contention(
+            "thread 01a10210-3e88-7b10-9997-11ba39470c2d already has an active writer"
+        )
+        assert not vendor.setup_lock_contention("no rollout found for thread t-1")
+        assert not vendor.turn_start_busy_failure("turn already in progress")
+        assert not vendor.previous_run_settled({"method": "turn/completed"})
+
 
 class TestPiRpc:
     """Resident rpc mode: spawn argv, setup chain, and event translation."""
@@ -319,6 +331,28 @@ class TestPiRpc:
             {"type": "extension_ui_request", "id": "ext-1", "method": "confirm"}
         ) == [{"type": "extension_ui_response", "id": "ext-1", "cancelled": True}]
         assert vendor.server_request_messages({"type": "message_update"}) == []
+
+    def test_busy_turn_start_rejections_are_recognized(self) -> None:
+        # Both are raised while the previous run has not truly ended; waiting
+        # for its agent_settled and resubmitting recovers them.
+        vendor = PiVendor()
+        assert vendor.turn_start_busy_failure(
+            "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') "
+            "to queue the message."
+        )
+        assert vendor.turn_start_busy_failure(
+            "Cannot submit a prompt while compaction is in progress. "
+            "Wait for compaction to finish and retry."
+        )
+        assert not vendor.turn_start_busy_failure('No API key found for provider "cpo-x".')
+        assert not vendor.setup_lock_contention("Agent is already processing.")
+
+    def test_only_agent_settled_ends_the_previous_run(self) -> None:
+        vendor = PiVendor()
+        assert vendor.previous_run_settled({"type": "agent_settled"})
+        assert not vendor.previous_run_settled(
+            {"type": "message_end", "message": {"role": "assistant", "stopReason": "stop"}}
+        )
 
 
 class TestZcodeAppServer:
