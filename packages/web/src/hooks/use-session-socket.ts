@@ -7,9 +7,11 @@ import { useSandboxAccess } from "@/hooks/use-sandbox-access";
 import type { SessionCapabilities } from "@/lib/session-capabilities";
 import {
   ingestLiveSandboxEvent,
+  pendingToThinkingEvent,
   pendingToTokenEvent,
   toUiSandboxEvent,
   type PendingAssistantText,
+  type PendingAssistantThinking,
 } from "@/lib/session-socket/event-log";
 import {
   createSessionSocketState,
@@ -66,6 +68,8 @@ interface UseSessionSocketReturn {
   currentParticipantId: string | null;
   canManageBudget: boolean;
   isProcessing: boolean;
+  /** The reasoning text streaming in the in-flight turn, if any. */
+  liveThinking: string | null;
   promptQueue: PromptQueueItem[];
   sendPrompt: (
     content: string,
@@ -126,6 +130,9 @@ export function useSessionSocket(
   // Buffers streamed assistant text in a ref so token events (which arrive at
   // high frequency) don't re-render; the text is appended on completion.
   const pendingTextRef = useRef<PendingAssistantText | null>(null);
+  // Same buffering for the reasoning trail; its latest text is mirrored into
+  // view state (liveThinking) so the processing indicator can show it live.
+  const pendingThinkingRef = useRef<PendingAssistantThinking | null>(null);
   const subscriptionWaitersRef = useRef(new Set<(subscribed: boolean) => void>());
   const pendingPromptRequestIdRef = useRef<string | null>(null);
   const pendingRecoveryRequestIdRef = useRef<string | null>(null);
@@ -193,20 +200,24 @@ export function useSessionSocket(
   const handleMessage = useCallback(
     (message: ServerMessage) => {
       if (message.type === "sandbox_event") {
-        const { pending, append } = ingestLiveSandboxEvent(
+        const { pendingText, pendingThinking, append } = ingestLiveSandboxEvent(
           pendingTextRef.current,
+          pendingThinkingRef.current,
           toUiSandboxEvent(message.event)
         );
-        pendingTextRef.current = pending;
+        pendingTextRef.current = pendingText;
+        pendingThinkingRef.current = pendingThinking;
         if (append.length > 0) {
           dispatch({ type: "events_appended", events: append });
         }
+        dispatch({ type: "live_thinking", content: pendingThinking?.content ?? null });
         return;
       }
 
       if (message.type === "subscribed") {
         console.log("WebSocket subscribed to session");
         pendingTextRef.current = null;
+        pendingThinkingRef.current = null;
         void refreshSandboxAccess();
       } else if (message.type === "sandbox_access_changed") {
         void refreshSandboxAccess();
@@ -371,11 +382,18 @@ export function useSessionSocket(
       return;
     }
     // Preserve partial content when stopping
-    const pending = pendingTextRef.current;
+    const pendingText = pendingTextRef.current;
+    const pendingThinking = pendingThinkingRef.current;
     pendingTextRef.current = null;
-    if (pending) {
-      dispatch({ type: "events_appended", events: [pendingToTokenEvent(pending)] });
+    pendingThinkingRef.current = null;
+    const flushed = [
+      ...(pendingThinking ? [pendingToThinkingEvent(pendingThinking)] : []),
+      ...(pendingText ? [pendingToTokenEvent(pendingText)] : []),
+    ];
+    if (flushed.length > 0) {
+      dispatch({ type: "events_appended", events: flushed });
     }
+    dispatch({ type: "live_thinking", content: null });
     send({ type: "stop" });
   }, [isOpen, send]);
 
@@ -487,6 +505,7 @@ export function useSessionSocket(
     currentParticipantId: state.currentParticipantId,
     canManageBudget: state.canManageBudget,
     isProcessing,
+    liveThinking: state.liveThinking,
     promptQueue: state.promptQueue,
     sendPrompt,
     cancelPrompt,

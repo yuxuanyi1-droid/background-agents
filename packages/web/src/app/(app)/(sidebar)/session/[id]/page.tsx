@@ -29,10 +29,7 @@ import {
   type SessionListResponse,
 } from "@/lib/session-list";
 import { useMediaQuery } from "@/hooks/use-media-query";
-import {
-  DEFAULT_MODEL,
-  type ReasoningEffort,
-} from "@open-inspect/shared/models";
+import { DEFAULT_MODEL, type ReasoningEffort } from "@open-inspect/shared/models";
 import { defaultReasoningEffort, type ModelPreference } from "@/lib/model-selection";
 import type { HarnessId } from "@open-inspect/shared/harnesses";
 import { resolveHarnessModelSelection } from "@/lib/session-harness";
@@ -94,6 +91,7 @@ export default function SessionPage() {
     currentParticipantId,
     canManageBudget,
     isProcessing,
+    liveThinking,
     promptQueue,
     sendPrompt,
     cancelPrompt,
@@ -337,6 +335,7 @@ export default function SessionPage() {
                 currentParticipantId={currentParticipantId}
                 participantProfiles={profiles}
                 isProcessing={isProcessing}
+                liveThinking={liveThinking}
                 promptQueue={promptQueue}
                 showSkeleton={false}
                 onLoadOlder={loadOlderEvents}
@@ -650,8 +649,7 @@ function useModelSelection(sessionState: SessionState, harness: HarnessId) {
   const { enabledModels, enabledModelOptions, loading: loadingEnabledModels } = useEnabledModels();
   const sessionModel = sessionState?.model ?? DEFAULT_MODEL;
   const sessionReasoningEffort =
-    sessionState?.reasoningEffort ??
-    defaultReasoningEffort(sessionModel, enabledModelOptions);
+    sessionState?.reasoningEffort ?? defaultReasoningEffort(sessionModel, enabledModelOptions);
   const {
     model: selectedModel,
     reasoningEffort,

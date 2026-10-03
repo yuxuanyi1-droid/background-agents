@@ -397,6 +397,73 @@ describe("completed turn activity", () => {
   });
 });
 
+describe("reasoning display", () => {
+  it("streams the live reasoning text in the processing indicator", () => {
+    render(
+      <SessionTimeline
+        {...baseTimelineProps}
+        events={[]}
+        isProcessing
+        liveThinking={"Comparing the two candidate approaches"}
+      />
+    );
+
+    expect(screen.getByText("Thinking...")).toBeInTheDocument();
+    expect(screen.getByText("Comparing the two candidate approaches")).toBeInTheDocument();
+  });
+
+  it("shows only the status while no reasoning has streamed", () => {
+    render(<SessionTimeline {...baseTimelineProps} events={[]} isProcessing liveThinking={null} />);
+
+    expect(screen.getByText("Thinking...")).toBeInTheDocument();
+  });
+
+  it("keeps the finished reasoning trail inside the collapsed turn activity", async () => {
+    const events: SandboxEvent[] = [
+      { ...event(), content: "Why is it slow?", timestamp: 100 },
+      {
+        type: "thinking",
+        content: "Checking the query plan first",
+        messageId: "message-1",
+        sandboxId: "sandbox-1",
+        timestamp: 101,
+      },
+      {
+        type: "tool_call",
+        tool: "Read",
+        args: { filePath: "/workspace/db.ts" },
+        callId: "call-1",
+        messageId: "message-1",
+        sandboxId: "sandbox-1",
+        timestamp: 102,
+      },
+      {
+        type: "token",
+        messageId: "message-1",
+        content: "Added the missing index.",
+        sandboxId: "sandbox-1",
+        timestamp: 103,
+      },
+      {
+        type: "execution_complete",
+        messageId: "message-1",
+        success: true,
+        sandboxId: "sandbox-1",
+        timestamp: 104,
+      },
+    ];
+    render(<SessionTimeline {...baseTimelineProps} events={events} />);
+
+    expect(screen.queryByText("Checking the query plan first")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Worked for 4s" }));
+
+    expect(screen.getByText("Thinking")).toBeInTheDocument();
+    expect(screen.getByText("Checking the query plan first")).toBeInTheDocument();
+    expect(screen.getByText("Added the missing index.")).toBeInTheDocument();
+  });
+});
+
 describe("tool call groups", () => {
   it("preserves expanded group and row state when history is prepended", async () => {
     const readEvents = [

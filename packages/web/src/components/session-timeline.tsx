@@ -37,7 +37,7 @@ import {
 import { toUiArtifactMetadata } from "@/lib/session-socket/artifact-metadata";
 import type { SandboxEvent } from "@/types/session";
 import type { SessionParticipantProfile } from "@open-inspect/shared/types/sessions";
-import { CheckIcon, CopyIcon, ErrorIcon } from "@/components/ui/icons";
+import { CheckIcon, ChevronRightIcon, CopyIcon, ErrorIcon } from "@/components/ui/icons";
 import { resolveParticipantDisplay } from "@/lib/participant-display";
 import { cn } from "@/lib/utils";
 import type { PromptQueueItem } from "@open-inspect/shared/types/server-messages";
@@ -59,6 +59,7 @@ export function SessionTimeline({
   currentParticipantId,
   participantProfiles,
   isProcessing,
+  liveThinking = null,
   promptQueue = EMPTY_PROMPT_QUEUE,
   showSkeleton,
   onLoadOlder,
@@ -69,6 +70,8 @@ export function SessionTimeline({
   currentParticipantId: string | null;
   participantProfiles: Record<string, SessionParticipantProfile>;
   isProcessing: boolean;
+  /** The reasoning text streaming in the in-flight turn, shown by the indicator. */
+  liveThinking?: string | null;
   promptQueue?: PromptQueueItem[];
   showSkeleton: boolean;
   onLoadOlder: () => void;
@@ -265,7 +268,7 @@ export function SessionTimeline({
   const renderVirtualRow = (row: TimelineVirtualRow): ReactNode => {
     switch (row.type) {
       case "thinking":
-        return <ThinkingIndicator />;
+        return <ThinkingIndicator content={liveThinking} />;
       case "item":
         return renderTimelineItem(row.item);
     }
@@ -307,11 +310,18 @@ export function SessionTimeline({
   );
 }
 
-function ThinkingIndicator() {
+function ThinkingIndicator({ content }: { content: string | null }) {
   return (
-    <div className="bg-card p-4 flex items-center gap-2">
-      <span className="inline-block w-2 h-2 bg-accent rounded-full animate-pulse" />
-      <span className="text-sm text-muted-foreground">Thinking...</span>
+    <div className="bg-card p-4 space-y-2">
+      <div className="flex items-center gap-2">
+        <span className="inline-block w-2 h-2 bg-accent rounded-full animate-pulse" />
+        <span className="text-sm text-muted-foreground">Thinking...</span>
+      </div>
+      {content && (
+        <div className="max-h-60 overflow-hidden border-l-2 border-border-muted pl-3 text-sm whitespace-pre-wrap text-muted-foreground [overflow-wrap:anywhere]">
+          {content}
+        </div>
+      )}
     </div>
   );
 }
@@ -598,6 +608,27 @@ function AssistantMessageEvent({ event, copied, onCopyContent }: EventRendererPr
   );
 }
 
+/**
+ * The model's reasoning trail for one segment, collapsed by default: it is
+ * context for the turn's tools and answer, not an answer itself. Native
+ * `<details>` keeps this a plain renderer with no expansion plumbing.
+ */
+function ThinkingEvent({ event }: EventRendererProps) {
+  if (event.type !== "thinking") return null;
+
+  return (
+    <details className="group border border-border-muted bg-card">
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs text-muted-foreground transition-colors hover:text-foreground sm:px-4">
+        <ChevronRightIcon className="h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-90" />
+        Thinking
+      </summary>
+      <div className="border-t border-border-muted px-3 py-2 text-sm whitespace-pre-wrap text-muted-foreground [overflow-wrap:anywhere] sm:px-4">
+        {event.content}
+      </div>
+    </details>
+  );
+}
+
 function ToolResultEvent({ event }: EventRendererProps) {
   if (event.type !== "tool_result") return null;
 
@@ -698,6 +729,7 @@ function formatEventTime(event: SandboxEvent): string {
 const eventRenderers = {
   user_message: UserMessageEvent,
   token: AssistantMessageEvent,
+  thinking: ThinkingEvent,
   tool_result: ToolResultEvent,
   git_sync: GitSyncEvent,
   artifact: ArtifactEvent,

@@ -26,6 +26,7 @@ const directTimelineEventEligibility = {
   user_message: (event: SandboxEvent) =>
     event.type === "user_message" && Boolean(event.content || event.attachments?.length),
   token: (event: SandboxEvent) => event.type === "token" && Boolean(event.content),
+  thinking: (event: SandboxEvent) => event.type === "thinking" && Boolean(event.content),
   tool_result: (event: SandboxEvent) => event.type === "tool_result" && Boolean(event.error),
   git_sync: () => true,
   artifact: (event: SandboxEvent) =>
@@ -108,11 +109,20 @@ function groupFlatEvents(events: SandboxEvent[]): FlatTimelineItem[] {
   return groups;
 }
 
+function thinkingDedupeKey(event: Extract<SandboxEvent, { type: "thinking" }>): string {
+  // Mirror the storage identity: one segment per message, or per part when
+  // the vendor streams parts. A segment re-streamed after a reconnect
+  // replaces its earlier copy instead of duplicating it, while distinct
+  // reasoning parts keep their own blocks.
+  return event.partId ? `part:${event.messageId}:${event.partId}` : `msg:${event.messageId}`;
+}
+
 function dedupeEvents(events: SandboxEvent[]): SandboxEvent[] {
   const result: Array<SandboxEvent | null> = [];
   const toolIndexes = new Map<string, number>();
   const completionMessageIds = new Set<string>();
   const tokenIndexes = new Map<string, number>();
+  const thinkingIndexes = new Map<string, number>();
 
   for (const event of events) {
     if (event.type === "tool_call" && event.callId) {
@@ -134,8 +144,17 @@ function dedupeEvents(events: SandboxEvent[]): SandboxEvent[] {
       if (index !== undefined) result[index] = null;
       tokenIndexes.set(event.messageId, result.length);
       result.push(event);
+    } else if (event.type === "thinking" && event.messageId) {
+      const key = thinkingDedupeKey(event);
+      const index = thinkingIndexes.get(key);
+      if (index !== undefined) result[index] = null;
+      thinkingIndexes.set(key, result.length);
+      result.push(event);
     } else {
-      if (event.type === "context_compacted") tokenIndexes.delete(event.messageId);
+      if (event.type === "context_compacted") {
+        tokenIndexes.delete(event.messageId);
+        thinkingIndexes.delete(`msg:${event.messageId}`);
+      }
       result.push(event);
     }
   }

@@ -873,6 +873,83 @@ describe("useSessionSocket", () => {
     });
   });
 
+  it("streams reasoning through liveThinking and appends the trail once on completion", async () => {
+    const { result } = renderHook(() =>
+      useSessionSocket("session-1", createSnapshot(), FULL_CAPABILITIES)
+    );
+
+    await waitFor(() => {
+      expect(FakeWebSocket.instances).toHaveLength(1);
+    });
+
+    const socket = FakeWebSocket.instances[0];
+    act(() => {
+      socket.open();
+      socket.receive(createSubscribedMessage());
+    });
+    await waitFor(() => expect(result.current.ready).toBe(true));
+
+    act(() => {
+      socket.receive({
+        type: "sandbox_event",
+        event: {
+          type: "thinking",
+          content: "Let me check",
+          messageId: "msg-1",
+          sandboxId: "sb-1",
+          timestamp: 1,
+        },
+      });
+    });
+
+    await waitFor(() => expect(result.current.liveThinking).toBe("Let me check"));
+    // Buffered like tokens: nothing reaches the visible log until it settles.
+    expect(result.current.events).toEqual([]);
+
+    act(() => {
+      socket.receive({
+        type: "sandbox_event",
+        event: {
+          type: "thinking",
+          content: "Let me check the file",
+          messageId: "msg-1",
+          sandboxId: "sb-1",
+          timestamp: 2,
+        },
+      });
+    });
+    await waitFor(() => expect(result.current.liveThinking).toBe("Let me check the file"));
+
+    act(() => {
+      socket.receive({
+        type: "sandbox_event",
+        event: {
+          type: "execution_complete",
+          messageId: "msg-1",
+          success: true,
+          sandboxId: "sb-1",
+          timestamp: 3,
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.liveThinking).toBeNull();
+      expect(result.current.events).toEqual([
+        expect.objectContaining({
+          type: "thinking",
+          content: "Let me check the file",
+          messageId: "msg-1",
+        }),
+        expect.objectContaining({
+          type: "execution_complete",
+          messageId: "msg-1",
+          success: true,
+        }),
+      ]);
+    });
+  });
+
   it("hydrates video metadata from subscribed artifacts", async () => {
     const { result } = renderHook(() =>
       useSessionSocket("session-1", createSnapshot(), FULL_CAPABILITIES)

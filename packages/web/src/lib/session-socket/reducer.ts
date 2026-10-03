@@ -51,6 +51,13 @@ export interface SessionSocketState {
    * gone); the whole boot is dropped when a fresh attempt starts.
    */
   boot: SandboxBoot | null;
+  /**
+   * The reasoning text streaming in the in-flight turn, mirrored from the
+   * live buffer so the processing indicator can show it while it arrives
+   * (the buffered event itself is only appended when the turn completes).
+   * Null when no reasoning is in flight.
+   */
+  liveThinking: string | null;
 }
 
 export const initialSessionSocketState: SessionSocketState = {
@@ -68,6 +75,7 @@ export const initialSessionSocketState: SessionSocketState = {
   promptQueue: [],
   sandboxError: null,
   boot: null,
+  liveThinking: null,
 };
 
 export type SessionSocketAction =
@@ -75,6 +83,8 @@ export type SessionSocketAction =
   | { type: "server_message"; message: Exclude<ServerMessage, { type: "sandbox_event" }> }
   /** Live sandbox events, already passed through token buffering. */
   | { type: "events_appended"; events: SandboxEvent[] }
+  /** The streamed reasoning text of the in-flight turn, or null when none. */
+  | { type: "live_thinking"; content: string | null }
   /** A fetch_history request was sent. */
   | { type: "history_requested" }
   /** The socket closed (clean or not). */
@@ -213,6 +223,9 @@ function reduceServerMessage(
         promptQueue: message.promptQueue,
         sandboxError: message.spawnError ?? null,
         boot: seedSandboxBoot(message),
+        // The snapshot's timeline already carries the latest thinking each
+        // in-flight entity has (events upsert), so the live mirror restarts.
+        liveThinking: null,
       };
     }
 
@@ -363,6 +376,10 @@ export function sessionSocketReducer(
       }
       return { ...state, events: [...state.events, ...action.events], boot };
     }
+
+    case "live_thinking":
+      if (state.liveThinking === action.content) return state;
+      return { ...state, liveThinking: action.content };
 
     case "history_requested":
       return { ...state, loadingHistory: true };

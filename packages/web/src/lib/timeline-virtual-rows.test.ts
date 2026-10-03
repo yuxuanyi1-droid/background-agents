@@ -41,6 +41,35 @@ describe("buildTimelineVirtualRows", () => {
     expect(rows[0]).toMatchObject({ type: "item", item: { id: "warning:session:4" } });
   });
 
+  it("renders a thinking event as an item row while the turn streams", () => {
+    const rows = buildTimelineVirtualRows({
+      items: buildSessionTimelineItems([
+        {
+          type: "thinking",
+          sandboxId: "sandbox",
+          messageId: "message",
+          timestamp: 1,
+          content: "weighing options",
+        },
+      ]),
+      isProcessing: true,
+    });
+
+    expect(rows.map((row) => row.type)).toEqual(["item", "thinking"]);
+    expect(rows[0]).toMatchObject({ item: { event: { type: "thinking" } } });
+  });
+
+  it("drops thinking events without content", () => {
+    const rows = buildTimelineVirtualRows({
+      items: buildSessionTimelineItems([
+        { type: "thinking", sandboxId: "sandbox", messageId: "message", timestamp: 1, content: "" },
+      ]),
+      isProcessing: false,
+    });
+
+    expect(rows).toEqual([]);
+  });
+
   it("includes content and thinking rows", () => {
     const items = [
       single({

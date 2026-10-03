@@ -6,10 +6,13 @@ import type { SandboxEvent } from "@/types/session";
  * Token events carry the full accumulated text for one assistant segment (not
  * incremental deltas), so the log keeps one final token per segment. Context
  * compaction ends the current segment before another starts for the same
- * message.
+ * message. Thinking events are the same shape and are collapsed the same way;
+ * they ride the live pipeline as a separate buffered stream so the reasoning
+ * trail never mixes into the assistant answer text.
  */
 
 export type AssistantTokenEvent = Extract<SandboxEvent, { type: "token" }>;
+export type AssistantThinkingEvent = Extract<SandboxEvent, { type: "thinking" }>;
 
 /**
  * The latest streamed assistant text for an in-flight segment. Only the most
@@ -19,6 +22,18 @@ export type AssistantTokenEvent = Extract<SandboxEvent, { type: "token" }>;
 export type PendingAssistantText = Pick<
   AssistantTokenEvent,
   "content" | "messageId" | "sandboxId" | "timestamp"
+>;
+
+/**
+ * The latest streamed reasoning text for one in-flight thinking segment.
+ * Thinking events are cumulative per segment, so the most recent one
+ * supersedes the last; when the stream switches segments (a reasoning part
+ * ends, or a new message starts), the finished segment is flushed as its own
+ * block instead of being overwritten so the whole trail survives.
+ */
+export type PendingAssistantThinking = Pick<
+  AssistantThinkingEvent,
+  "content" | "messageId" | "sandboxId" | "timestamp" | "partId"
 >;
 
 export function toUiSandboxEvent(event: SandboxEvent): SandboxEvent {
@@ -97,50 +112,98 @@ export function collapseReplayTokenEvents(events: SandboxEvent[]): SandboxEvent[
 
 export interface LiveEventIngestion {
   /** The pending assistant text after processing this event. */
-  pending: PendingAssistantText | null;
+  pendingText: PendingAssistantText | null;
+  /** The pending reasoning text after processing this event. */
+  pendingThinking: PendingAssistantThinking | null;
   /** Events ready to append to the visible event log. */
   append: SandboxEvent[];
 }
 
 /**
- * Step function for live sandbox events. Streamed token text is buffered
- * (not displayed) until its execution completes, at which point the final
- * text is emitted once with the token's original timestamp. All other
- * events pass through unchanged.
+ * Step function for live sandbox events. Streamed token and thinking text is
+ * buffered (not displayed) until its execution completes, at which point the
+ * final text is emitted once with its original timestamp. All other events
+ * pass through unchanged.
  */
 export function ingestLiveSandboxEvent(
-  pending: PendingAssistantText | null,
+  pendingText: PendingAssistantText | null,
+  pendingThinking: PendingAssistantThinking | null,
   event: SandboxEvent
 ): LiveEventIngestion {
   if (event.type === "token" && event.content && event.messageId) {
     return {
-      pending: {
+      pendingText: {
         content: event.content,
         messageId: event.messageId,
         sandboxId: event.sandboxId,
         timestamp: event.timestamp,
       },
+      pendingThinking,
       append: [],
     };
   }
 
+  if (event.type === "thinking" && event.content && event.messageId) {
+    const next: PendingAssistantThinking = {
+      content: event.content,
+      messageId: event.messageId,
+      sandboxId: event.sandboxId,
+      timestamp: event.timestamp,
+      ...(event.partId ? { partId: event.partId } : {}),
+    };
+    // A changed identity means the buffered segment is finished: flush it as
+    // its own block so a new reasoning part does not overwrite the trail of
+    // the previous one.
+    if (
+      pendingThinking &&
+      (pendingThinking.messageId !== next.messageId ||
+        (pendingThinking.partId ?? null) !== (next.partId ?? null))
+    ) {
+      return {
+        pendingText,
+        pendingThinking: next,
+        append: [pendingToThinkingEvent(pendingThinking)],
+      };
+    }
+    return { pendingText, pendingThinking: next, append: [] };
+  }
+
   if (event.type === "execution_complete") {
     return {
-      pending: null,
-      append: pending ? [pendingToTokenEvent(pending), event] : [event],
+      pendingText: null,
+      pendingThinking: null,
+      append: [
+        ...(pendingThinking ? [pendingToThinkingEvent(pendingThinking)] : []),
+        ...(pendingText ? [pendingToTokenEvent(pendingText)] : []),
+        event,
+      ],
     };
   }
 
-  if (event.type === "context_compacted" && pending?.messageId === event.messageId) {
-    return {
-      pending: null,
-      append: [pendingToTokenEvent(pending), event],
-    };
+  if (event.type === "context_compacted") {
+    const compactedText = pendingText?.messageId === event.messageId ? pendingText : null;
+    const compactedThinking =
+      pendingThinking?.messageId === event.messageId ? pendingThinking : null;
+    if (compactedText || compactedThinking) {
+      return {
+        pendingText: compactedText ? null : pendingText,
+        pendingThinking: compactedThinking ? null : pendingThinking,
+        append: [
+          ...(compactedThinking ? [pendingToThinkingEvent(compactedThinking)] : []),
+          ...(compactedText ? [pendingToTokenEvent(compactedText)] : []),
+          event,
+        ],
+      };
+    }
   }
 
-  return { pending, append: [event] };
+  return { pendingText, pendingThinking, append: [event] };
 }
 
 export function pendingToTokenEvent(pending: PendingAssistantText): AssistantTokenEvent {
   return { type: "token", ...pending };
+}
+
+export function pendingToThinkingEvent(pending: PendingAssistantThinking): AssistantThinkingEvent {
+  return { type: "thinking", ...pending };
 }

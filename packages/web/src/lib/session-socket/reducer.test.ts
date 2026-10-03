@@ -677,6 +677,29 @@ describe("sessionSocketReducer", () => {
     });
   });
 
+  describe("live_thinking", () => {
+    it("mirrors the streamed reasoning text and clears it when the stream ends", () => {
+      const base = reduce(subscribedState(), { type: "live_thinking", content: "weighing" });
+      expect(base.liveThinking).toBe("weighing");
+
+      const grown = reduce(base, { type: "live_thinking", content: "weighing options" });
+      expect(grown.liveThinking).toBe("weighing options");
+
+      const cleared = reduce(grown, { type: "live_thinking", content: null });
+      expect(cleared.liveThinking).toBeNull();
+    });
+
+    it("keeps state identity when the text does not change", () => {
+      const base = reduce(subscribedState(), { type: "live_thinking", content: "steady" });
+      expect(reduce(base, { type: "live_thinking", content: "steady" })).toBe(base);
+    });
+
+    it("drops the mirror when the subscribed snapshot is authoritative", () => {
+      const base = reduce(subscribedState(), { type: "live_thinking", content: "stale" });
+      expect(reduce(base, serverMessage(createSubscribedMessage())).liveThinking).toBeNull();
+    });
+  });
+
   describe("history", () => {
     it("marks loading on request and prepends the fetched page", () => {
       const base = reduce(
