@@ -656,32 +656,100 @@ class TestZcodeAppServer:
         assert settled.value.events[-1]["type"] == "token"
         assert settled.value.events[-1]["content"] == "Hello"
 
-    def test_compaction_part_emits_context_compacted_once(self) -> None:
+    def test_compact_boundary_emits_context_compacted_once(self) -> None:
+        # Compact lifecycle events have no dedicated protocol type: the raw
+        # payloads ride "session.updated". Only the boundary payload (with
+        # boundaryId + summarizedMessageCount) marks the successful
+        # compaction; the started/completed timeline payloads bracket it.
         vendor = ZcodeVendor()
         state = _state()
-        boundary = {
+        started = {
+            "operationId": "op-1",
             "messageId": "msg-9",
-            "partId": "p-9",
-            "part": {"type": "compaction", "auto": True},
+            "status": "started",
+            "trigger": "auto",
+            "display": "separator",
         }
         assert (
-            vendor.parse_server_message(self._session_event("part.started", boundary), state) == []
+            vendor.parse_server_message(self._session_event("session.updated", started), state)
+            == []
         )
+        boundary = {
+            "boundaryId": "b-1",
+            "trigger": "auto",
+            "preCompactTokenCount": 90000,
+            "summarizedMessageCount": 24,
+            "summaryMessageIds": ["msg-20"],
+            "traceId": "tr-1",
+        }
         assert vendor.parse_server_message(
-            self._session_event("part.upserted", boundary), state
+            self._session_event("session.updated", boundary), state
         ) == [{"type": "context_compacted", "messageId": "m1"}]
-        # Timeline separator parts are display-only; the boundary already
-        # reported itself.
+        completed = {
+            "operationId": "op-1",
+            "messageId": "msg-9",
+            "status": "completed",
+            "trigger": "auto",
+            "boundaryId": "b-1",
+            "summaryMessageId": "msg-20",
+            "replace": True,
+            "postCompactTokenCount": 12000,
+        }
         assert (
+            vendor.parse_server_message(self._session_event("session.updated", completed), state)
+            == []
+        )
+        # Microcompaction only clears tool results; it is not a compaction.
+        microcompact = {
+            "trigger": "token_pressure",
+            "strategy": "local_tool_result_clear",
+            "preMicrocompactTokenCount": 80000,
+            "postMicrocompactTokenCount": 70000,
+            "tokensSaved": 10000,
+            "clearedToolCallIds": ["tc-1"],
+            "keptToolCallIds": [],
+            "clearedMessageCount": 1,
+            "traceId": "tr-2",
+        }
+        assert (
+            vendor.parse_server_message(self._session_event("session.updated", microcompact), state)
+            == []
+        )
+
+    def test_turn_completed_usage_uses_model_usage_summary_fields(self) -> None:
+        # turn.completed.usage is zcode's ModelUsageSummary: camelCase counts,
+        # including cacheReadTokens/cacheWriteTokens.
+        vendor = ZcodeVendor()
+        state = _state()
+        with pytest.raises(CliTurnSettled):
             vendor.parse_server_message(
                 self._session_event(
-                    "part.upserted",
-                    {"messageId": "msg-9", "partId": "p-10", "part": {"type": "timeline"}},
+                    "turn.completed",
+                    {
+                        "response": "done",
+                        "usage": {
+                            "source": "provider",
+                            "modelRequestCount": 3,
+                            "inputTokens": 120,
+                            "outputTokens": 40,
+                            "totalTokens": 160,
+                            "cacheReadTokens": 90,
+                            "cacheWriteTokens": 10,
+                            "reasoningTokens": 5,
+                            "webSearchRequests": 0,
+                            "webFetchRequests": 0,
+                        },
+                    },
                 ),
                 state,
             )
-            == []
-        )
+        assert state.tokens == {
+            "input": 120,
+            "output": 40,
+            "reasoning": 5,
+            "cache": {"read": 90, "write": 10},
+            "total": 160,
+        }
 
     def test_streaming_text_and_tool_input_merge_into_the_turn(self) -> None:
         # model.streaming is the only carrier of incremental assistant text;

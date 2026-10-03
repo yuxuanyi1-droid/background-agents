@@ -980,11 +980,17 @@ class ZcodeVendor:
             if payload.get("field") in (None, "text") and isinstance(payload.get("delta"), str):
                 return append_text_events(state, payload["delta"])
             return []
-        if kind == "part.upserted":
-            # The compact boundary rides the message stream as a "compaction"
-            # part; upserted only, so a started+upserted pair emits once.
-            part = payload.get("part")
-            if isinstance(part, dict) and part.get("type") == "compaction":
+        if kind == "session.updated":
+            # Compact lifecycle events have no dedicated protocol type: the
+            # session mapper's default branch forwards their raw payloads
+            # under "session.updated". The boundary payload is the carrier
+            # emitted exactly once per *successful* compaction — CompactStarted
+            # also precedes failed attempts, CompactCompleted trails the
+            # boundary — and its required summarizedMessageCount separates it
+            # from the timeline payloads that also carry boundaryId.
+            # MicrocompactBoundary (partial tool-result clearing) lacks both
+            # keys and is deliberately not reported as a compaction.
+            if isinstance(payload.get("boundaryId"), str) and "summarizedMessageCount" in payload:
                 return [{"type": "context_compacted", "messageId": state.message_id}]
             return []
         if kind == "tool.updated":
@@ -1175,8 +1181,9 @@ def _pi_message_cost(usage: dict[str, Any] | None) -> float | None:
 
 
 # Vendors report usage with different flat key styles (codex snake_case, pi
-# camelCase); each canonical count maps to its known spellings in preference
-# order. ``total`` is the vendor's own turn total where it reports one.
+# and zcode camelCase); each canonical count maps to its known spellings in
+# preference order. ``total`` is the vendor's own turn total where it reports
+# one.
 _USAGE_KEY_SPELLINGS: dict[str, tuple[str, ...]] = {
     "input": ("input_tokens", "inputTokens", "input"),
     "output": ("output_tokens", "outputTokens", "output"),
@@ -1192,12 +1199,14 @@ _USAGE_KEY_SPELLINGS: dict[str, tuple[str, ...]] = {
         "cachedInputTokens",
         "cache_read_input_tokens",
         "cacheReadInputTokens",
+        "cacheReadTokens",  # zcode ModelUsageSummary
         "cacheRead",
     ),
     "write": (
         "cache_write_input_tokens",
         "cacheWriteInputTokens",
         "cache_creation_input_tokens",
+        "cacheWriteTokens",  # zcode ModelUsageSummary
         "cacheWrite",
     ),
     "total": ("total_tokens", "totalTokens", "total"),
