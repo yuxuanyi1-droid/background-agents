@@ -139,6 +139,47 @@ class TestCodexAppServer:
         # no further events — the harness emits whatever rides it either way.
         assert isinstance(settled.value.events, list)
 
+    def test_reasoning_summary_deltas_stream_as_thinking(self) -> None:
+        # The summary is Codex's visible thinking trail; the raw
+        # item/reasoning/textDelta counterpart stays provider-internal and is
+        # not read. Deltas accumulate per summary part, and the completed
+        # item's snapshot completes anything that streamed short.
+        vendor = CodexVendor()
+        state = _state()
+        events = vendor.parse_server_message(
+            {
+                "method": "item/reasoning/summaryTextDelta",
+                "params": {"itemId": "r1", "summaryIndex": 0, "delta": "Let me"},
+            },
+            state,
+        )
+        assert events == [
+            {"type": "step_start", "messageId": "m1", "stepId": state.step_id},
+            {"type": "thinking", "content": "Let me", "messageId": "m1"},
+        ]
+        events = vendor.parse_server_message(
+            {
+                "method": "item/reasoning/summaryTextDelta",
+                "params": {"itemId": "r1", "summaryIndex": 0, "delta": " check"},
+            },
+            state,
+        )
+        assert events == [{"type": "thinking", "content": "Let me check", "messageId": "m1"}]
+        # Part 1 streamed no deltas: the item.completed snapshot seeds it and
+        # joins it after part 0, in summary order.
+        snapshot = {
+            "method": "item/completed",
+            "params": {
+                "item": {"id": "r1", "type": "reasoning", "summary": ["Let me check", "Then act"]}
+            },
+        }
+        assert vendor.parse_server_message(snapshot, state) == [
+            {"type": "thinking", "content": "Let me check\n\nThen act", "messageId": "m1"}
+        ]
+        # A repeated snapshot is a no-op — the deltas and the snapshot must
+        # not double the trail.
+        assert vendor.parse_server_message(snapshot, state) == []
+
     def test_compaction_item_emits_context_compacted(self) -> None:
         vendor = CodexVendor()
         state = _state()
@@ -480,6 +521,50 @@ class TestPiRpc:
         with pytest.raises(CliTurnSettled):
             vendor.parse_server_message({"type": "agent_settled"}, state)
 
+    def test_thinking_deltas_stream_and_the_end_never_shrinks_the_trail(self) -> None:
+        vendor = PiVendor()
+        state = _state()
+        events = vendor.parse_server_message(
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "thinking_delta", "delta": "Hmm"},
+            },
+            state,
+        )
+        assert events == [
+            {"type": "step_start", "messageId": "m1", "stepId": state.step_id},
+            {"type": "thinking", "content": "Hmm", "messageId": "m1"},
+        ]
+        events = vendor.parse_server_message(
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "thinking_delta", "delta": " ok"},
+            },
+            state,
+        )
+        assert events == [{"type": "thinking", "content": "Hmm ok", "messageId": "m1"}]
+        # A shorter end-of-block snapshot must not shrink the streamed trail.
+        assert (
+            vendor.parse_server_message(
+                {
+                    "type": "message_update",
+                    "assistantMessageEvent": {"type": "thinking_end", "content": "Hm"},
+                },
+                state,
+            )
+            == []
+        )
+        # A block whose deltas never arrived (a redacted block is complete at
+        # start) is adopted whole when its end exceeds the trail.
+        events = vendor.parse_server_message(
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "thinking_end", "content": "Hmm ok, plus"},
+            },
+            state,
+        )
+        assert events == [{"type": "thinking", "content": "Hmm ok, plus", "messageId": "m1"}]
+
     def test_interrupt_and_extension_ui_reply(self) -> None:
         vendor = PiVendor()
         assert vendor.interrupt_messages(session_id="s-1", state=_state()) == [{"type": "abort"}]
@@ -604,7 +689,9 @@ class TestZcodeAppServer:
             self._session_event("part.delta", {"field": "text", "delta": "Hel"}), state
         )
         assert events[-1]["type"] == "token" and events[-1]["content"] == "Hel"
-        # Reasoning deltas are not surfaced yet.
+        # The session-store part.delta projection is not the reasoning carrier
+        # (model.streaming's reasoning_delta is, see the streaming test);
+        # consuming both would double the trail.
         assert (
             vendor.parse_server_message(
                 self._session_event("part.delta", {"field": "reasoning", "delta": "hm"}), state
@@ -766,13 +853,10 @@ class TestZcodeAppServer:
             state,
         )
         assert [e["content"] for e in tokens if e["type"] == "token"] == ["Hello"]
-        assert (
-            vendor.parse_server_message(
-                self._session_event("model.streaming", {"kind": "reasoning_delta", "delta": "hmm"}),
-                state,
-            )
-            == []
-        )
+        assert vendor.parse_server_message(
+            self._session_event("model.streaming", {"kind": "reasoning_delta", "delta": "hmm"}),
+            state,
+        ) == [{"type": "thinking", "content": "hmm", "messageId": "m1"}]
         assert (
             vendor.parse_server_message(
                 self._session_event(
@@ -805,6 +889,35 @@ class TestZcodeAppServer:
         tool_call = next(e for e in scheduled if e["type"] == "tool_call")
         assert tool_call["tool"] == "Write"
         assert tool_call["args"] == {"path": "a.py"}
+
+    def test_reasoning_streams_as_thinking_across_the_turn(self) -> None:
+        # model.streaming is the live reasoning carrier; the store-projection
+        # part.delta channel duplicates it and is deliberately not consumed.
+        vendor = ZcodeVendor()
+        state = _state()
+        events = vendor.parse_server_message(
+            self._session_event("model.streaming", {"kind": "reasoning_delta", "delta": "Hmm"}),
+            state,
+        )
+        assert events == [
+            {"type": "step_start", "messageId": "m1", "stepId": state.step_id},
+            {"type": "thinking", "content": "Hmm", "messageId": "m1"},
+        ]
+        events = vendor.parse_server_message(
+            self._session_event(
+                "model.streaming", {"kind": "reasoning_delta", "delta": ", let me"}
+            ),
+            state,
+        )
+        assert events == [{"type": "thinking", "content": "Hmm, let me", "messageId": "m1"}]
+        # reasoning_start/end and empty deltas carry no text.
+        assert (
+            vendor.parse_server_message(
+                self._session_event("model.streaming", {"kind": "reasoning_delta", "delta": ""}),
+                state,
+            )
+            == []
+        )
 
     def test_completed_response_does_not_duplicate_streamed_text(self) -> None:
         vendor = ZcodeVendor()
@@ -1046,6 +1159,20 @@ class TestCodex:
             {"type": "turn.completed", "usage": {"input_tokens": 3, "output_tokens": 5}}, state
         )
         assert state.tokens == {"input": 3, "output": 5}
+
+    def test_reasoning_item_adopts_its_summary_without_deltas(self) -> None:
+        # The one-shot exec stream emits reasoning items without the live
+        # summary deltas; the completed item's summary seeds the trail there.
+        vendor = CodexVendor()
+        state = _state()
+        item = {"id": "r1", "type": "reasoning", "summary": ["Look", "Leap"]}
+        events = vendor.parse_record({"type": "item.completed", "item": item}, state)
+        assert events == [
+            {"type": "step_start", "messageId": "m1", "stepId": state.step_id},
+            {"type": "thinking", "content": "Look\n\nLeap", "messageId": "m1"},
+        ]
+        # Re-adoption must not double a trail the deltas already delivered.
+        assert vendor.parse_record({"type": "item.completed", "item": item}, state) == []
 
     def test_compaction_item_emits_context_compacted(self) -> None:
         vendor = CodexVendor()

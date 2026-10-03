@@ -63,6 +63,7 @@ class _PromptState:
     opencode_message_id: str
     start_time: float
     cumulative_text: dict[str, str] = field(default_factory=dict)
+    cumulative_thinking: dict[str, str] = field(default_factory=dict)
     emitted_tool_states: set[str] = field(default_factory=set)
     attribution: MessageAttribution = field(init=False)
     pending_parts: dict[str, list[_PendingPart]] = field(default_factory=dict)
@@ -634,6 +635,27 @@ class OpenCodePromptStream:
                     {
                         "type": "token",
                         "content": state.cumulative_text[part_id],
+                        "messageId": state.message_id,
+                        **({"partId": part_id} if isinstance(part_id, str) and part_id else {}),
+                    }
+                )
+
+        elif part_type == "reasoning":
+            if is_subtask:
+                return events  # Don't forward child reasoning
+            text = part.get("text", "")
+            if delta:
+                state.cumulative_thinking[part_id] = (
+                    state.cumulative_thinking.get(part_id, "") + delta
+                )
+            else:
+                state.cumulative_thinking[part_id] = text
+
+            if state.cumulative_thinking.get(part_id):
+                events.append(
+                    {
+                        "type": "thinking",
+                        "content": state.cumulative_thinking[part_id],
                         "messageId": state.message_id,
                         **({"partId": part_id} if isinstance(part_id, str) and part_id else {}),
                     }

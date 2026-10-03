@@ -41,9 +41,11 @@ from .cli_harness import (
     CliTurnSettled,
     CliTurnState,
     append_text_events,
+    append_thinking_events,
     error_event,
     step_start_events,
     text_events,
+    thinking_events,
     tool_events,
 )
 
@@ -108,6 +110,34 @@ def _as_text(value: Any) -> str:
                 parts.append(block["text"])
         return "".join(parts)
     return ""
+
+
+def _joined_reasoning(state: CliTurnState) -> str:
+    """The turn's reasoning summary parts, in the order they streamed."""
+    return "\n\n".join(text for text in state.reasoning_texts.values() if text)
+
+
+def _codex_reasoning_adoption(item: dict[str, Any], state: CliTurnState) -> list[Any]:
+    """Adopt a completed reasoning item's summary parts that streamed short.
+
+    The live summary deltas are the normal source; the item payload closes the
+    gap when they were absent (the one-shot exec stream) or partial. Only
+    growth is adopted, so a summary already delivered live is a no-op.
+    """
+    summary = item.get("summary")
+    if not isinstance(summary, list):
+        return []
+    item_id = str(item.get("id") or "reasoning")
+    changed = False
+    for index, part in enumerate(summary):
+        text = part if isinstance(part, str) else ""
+        key = f"{item_id}:{index}"
+        if len(text) > len(state.reasoning_texts.get(key, "")):
+            state.reasoning_texts[key] = text
+            changed = True
+    if not changed:
+        return []
+    return thinking_events(state, _joined_reasoning(state))
 
 
 # App-server item types are camelCase; the exec stream and the translator
@@ -390,6 +420,14 @@ class CodexVendor:
         error = params.get("error")
         if isinstance(error, dict) and error:
             record["error"] = error
+        if method == "item/reasoning/summaryTextDelta":
+            # The visible thinking trail; the raw ``textDelta`` counterpart is
+            # provider-internal reasoning Codex keeps hidden, so it is not
+            # carried. The summary also rides item.completed, which the
+            # one-shot exec stream emits without these deltas.
+            for key in ("itemId", "summaryIndex", "delta"):
+                if key in params:
+                    record[key] = params[key]
         return record
 
     def parse_record(self, record: dict[str, Any], state: CliTurnState) -> list[Any]:
@@ -418,7 +456,16 @@ class CodexVendor:
             if kind == "item.completed" and item.get("type") == "context_compaction":
                 # Completed only: started would double every boundary.
                 events.append({"type": "context_compacted", "messageId": state.message_id})
+            if kind == "item.completed" and item.get("type") == "reasoning":
+                events.extend(_codex_reasoning_adoption(item, state))
             return events
+        if kind == "item.reasoning.summaryTextDelta":
+            delta = record.get("delta")
+            if isinstance(delta, str) and delta:
+                key = f"{record.get('itemId') or 'reasoning'}:{record.get('summaryIndex')}"
+                state.reasoning_texts[key] = state.reasoning_texts.get(key, "") + delta
+                return thinking_events(state, _joined_reasoning(state))
+            return []
         if kind == "turn.completed":
             # The app-server reports every terminal turn through this one
             # notification, distinguished by the turn's status.
@@ -757,6 +804,18 @@ class PiVendor:
         if event_type == "text_end":
             content = event.get("content")
             return text_events(state, content) if isinstance(content, str) else []
+        if event_type == "thinking_delta":
+            delta = event.get("delta")
+            return append_thinking_events(state, delta) if isinstance(delta, str) else []
+        if event_type == "thinking_end":
+            # The block's authoritative text, adopted only when it exceeds what
+            # the deltas delivered: a later block's end (or a redacted block,
+            # which is complete at start and emits no deltas) must not shrink
+            # the earlier blocks' trail.
+            content = event.get("content")
+            if isinstance(content, str) and len(content) > len(state.thinking):
+                return thinking_events(state, content)
+            return []
         if event_type == "toolcall_end":
             call = event.get("toolCall")
             if not isinstance(call, dict):
@@ -1048,6 +1107,13 @@ class ZcodeVendor:
             delta = payload.get("delta")
             if isinstance(delta, str) and delta:
                 return append_text_events(state, delta)
+            return []
+        if stream_kind == "reasoning_delta":
+            # The model's live thinking stream (reasoning_start/end carry no
+            # text); it accumulates across the turn like the answer text.
+            delta = payload.get("delta")
+            if isinstance(delta, str) and delta:
+                return append_thinking_events(state, delta)
             return []
         if stream_kind == "tool_call":
             call_id = payload.get("toolCallId")

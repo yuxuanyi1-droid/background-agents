@@ -29,6 +29,7 @@ from claude_agent_sdk import (
     StreamEvent,
     SystemMessage,
     TextBlock,
+    ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
@@ -186,6 +187,10 @@ class _TurnState:
     cost_baseline: float | None
     texts: list[_MessageText] = field(default_factory=list)
     last_token_content: str = ""
+    # The turn's thinking trail, kept out of the assistant text; streamed from
+    # thinking deltas and closed by the authoritative ThinkingBlock text.
+    thinking_text: str = ""
+    last_thinking_content: str = ""
     tool_names: dict[str, str] = field(default_factory=dict)
     tool_args: dict[str, dict[str, Any]] = field(default_factory=dict)
     emitted_error: bool = False
@@ -825,6 +830,9 @@ class ClaudeHarness:
                     entry = state.texts[-1] if state.texts else state.entry_for(None)
                     entry.text += str(delta["text"])
                     events.extend(self._token_event(state))
+                elif delta.get("type") == "thinking_delta" and delta.get("thinking"):
+                    state.thinking_text += str(delta["thinking"])
+                    events.extend(self._thinking_event(state))
             return events, None
 
         if isinstance(message, AssistantMessage):
@@ -847,6 +855,15 @@ class ClaudeHarness:
                     if len(final_text) > len(entry.text):
                         entry.text = final_text
                         events.extend(self._token_event(state))
+                thinking = "".join(
+                    block.thinking for block in message.content if isinstance(block, ThinkingBlock)
+                )
+                if thinking and len(thinking) > len(state.thinking_text):
+                    # The block's authoritative text, adopted only when it
+                    # exceeds what the deltas delivered; a later, shorter
+                    # block's text must not shrink the earlier trail.
+                    state.thinking_text = thinking
+                    events.extend(self._thinking_event(state))
             for block in message.content:
                 if isinstance(block, ToolUseBlock):
                     state.tool_names[block.id] = _canonical_tool_name(block.name)
@@ -978,6 +995,13 @@ class ClaudeHarness:
             return []
         state.last_token_content = content
         return [{"type": "token", "content": content, "messageId": state.message_id}]
+
+    def _thinking_event(self, state: _TurnState) -> list[BridgeEvent]:
+        content = state.thinking_text
+        if not content or content == state.last_thinking_content:
+            return []
+        state.last_thinking_content = content
+        return [{"type": "thinking", "content": content, "messageId": state.message_id}]
 
     def _tool_event(
         self,

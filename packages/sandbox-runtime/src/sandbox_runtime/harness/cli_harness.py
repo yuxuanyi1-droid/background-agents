@@ -81,6 +81,10 @@ class CliTurnState:
     step_id: str
     text: str = ""
     last_emitted_text: str = ""
+    # The model's reasoning, kept separate from the answer: displayed as a
+    # thinking trail, never folded into the assistant message.
+    thinking: str = ""
+    last_emitted_thinking: str = ""
     session_id: str | None = None
     server_turn_id: str | None = None
     final_message_seen_at: float | None = None
@@ -100,6 +104,9 @@ class CliTurnState:
     tool_names: dict[str, str] = field(default_factory=dict)
     tool_args: dict[str, dict[str, Any]] = field(default_factory=dict)
     agent_texts: dict[str, str] = field(default_factory=dict)
+    # Reasoning summary parts keyed by their vendor identity (codex item id and
+    # summary index); joined in stream order into the cumulative thinking text.
+    reasoning_texts: dict[str, str] = field(default_factory=dict)
 
 
 def step_start_events(state: CliTurnState) -> list[BridgeEvent]:
@@ -125,6 +132,28 @@ def text_events(state: CliTurnState, text: str) -> list[BridgeEvent]:
 
 def append_text_events(state: CliTurnState, delta: str) -> list[BridgeEvent]:
     return text_events(state, state.text + delta)
+
+
+def thinking_events(state: CliTurnState, text: str) -> list[BridgeEvent]:
+    """Emit one cumulative thinking event when the reasoning text grows.
+
+    Thinking is a display stream like tokens — cumulative, so a dropped event
+    self-heals — but it never replaces the assistant answer text.
+    """
+    if not text or text == state.thinking:
+        return []
+    state.thinking = text
+    if text == state.last_emitted_thinking:
+        return []
+    state.last_emitted_thinking = text
+    return [
+        *step_start_events(state),
+        {"type": "thinking", "content": text, "messageId": state.message_id},
+    ]
+
+
+def append_thinking_events(state: CliTurnState, delta: str) -> list[BridgeEvent]:
+    return thinking_events(state, state.thinking + delta)
 
 
 def tool_events(

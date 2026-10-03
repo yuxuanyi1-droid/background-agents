@@ -29,6 +29,15 @@ def create_text_part(part_id: str, text: str) -> dict:
     }
 
 
+def create_reasoning_part(part_id: str, text: str) -> dict:
+    """Create a reasoning part."""
+    return {
+        "id": part_id,
+        "type": "reasoning",
+        "text": text,
+    }
+
+
 def create_tool_part(
     call_id: str,
     tool: str,
@@ -254,6 +263,43 @@ class TestHandlePartTranslation:
 
         events = stream._handle_part(make_state("cp-message-123"), part, None)
 
+        assert events == []
+
+    def test_reasoning_part_becomes_a_thinking_event(self, bridge: AgentBridge):
+        """Reasoning is the model's thinking trail, kept out of the answer."""
+        stream = bridge.harness.prompt_stream
+        state = make_state("cp-message-123")
+        first = stream._handle_part(state, create_reasoning_part("part-r1", "Hmm"), None)[0]
+        updated = stream._handle_part(
+            state, create_reasoning_part("part-r1", "Hmm, let me check"), None
+        )[0]
+
+        assert first == {
+            "type": "thinking",
+            "content": "Hmm",
+            "messageId": "cp-message-123",
+            "partId": "part-r1",
+        }
+        assert updated["content"] == "Hmm, let me check"
+        # The reasoning stream never leaks into the answer text.
+        assert state.cumulative_text == {}
+
+    def test_reasoning_delta_accumulates_across_updates(self, bridge: AgentBridge):
+        stream = bridge.harness.prompt_stream
+        state = make_state("cp-message-123")
+        part = {"id": "part-r1", "type": "reasoning"}
+        first = stream._handle_part(state, part, "Hmm", is_subtask=False)[0]
+        second = stream._handle_part(state, part, ", let me check", is_subtask=False)[0]
+
+        assert (first["type"], first["content"]) == ("thinking", "Hmm")
+        assert second["content"] == "Hmm, let me check"
+
+    def test_child_reasoning_is_not_forwarded(self, bridge: AgentBridge):
+        stream = bridge.harness.prompt_stream
+        state = make_state("cp-message-123")
+        events = stream._handle_part(
+            state, create_reasoning_part("part-r1", "child thought"), None, is_subtask=True
+        )
         assert events == []
 
     def test_step_start_part(self, bridge: AgentBridge):

@@ -50,9 +50,9 @@ def parse_harness_id(value: object) -> HarnessId:
         raise ValueError(f"Unsupported harness: {value!r}") from error
 
 
-# Runtime-neutral bridge event dict (``token``, ``tool_call``, ``step_start``,
-# ``step_finish``, ``context_compacted``, ``session_title``, ``error``,
-# ``warning``). Never ``execution_complete``.
+# Runtime-neutral bridge event dict (``token``, ``thinking``, ``tool_call``,
+# ``step_start``, ``step_finish``, ``context_compacted``, ``session_title``,
+# ``error``, ``warning``). Never ``execution_complete``.
 BridgeEvent = dict[str, Any]
 EventSink = Callable[[BridgeEvent], Awaitable[None]]
 

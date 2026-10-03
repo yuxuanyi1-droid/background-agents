@@ -24,6 +24,7 @@ from claude_agent_sdk import (
     StreamEvent,
     SystemMessage,
     TextBlock,
+    ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
@@ -602,6 +603,69 @@ class TestTranslation:
         assert sent["type"] == "user"
         assert sent["message"]["content"] == [{"type": "text", "text": "hi"}]
         assert sent["session_id"] == h.harness.session_id
+
+    @pytest.mark.asyncio
+    async def test_thinking_deltas_stream_as_thinking(self, tmp_path: Path) -> None:
+        turn = [
+            _stream("message_start", message={"id": "msg_1"}),
+            _stream("content_block_delta", delta={"type": "thinking_delta", "thinking": "Hmm"}),
+            _stream("content_block_delta", delta={"type": "thinking_delta", "thinking": " ok"}),
+            _text_delta("Answer"),
+            AssistantMessage(
+                content=[
+                    ThinkingBlock(thinking="Hmm ok", signature="sig"),
+                    TextBlock("Answer"),
+                ],
+                model="claude-sonnet-4-6",
+                message_id="msg_1",
+            ),
+            _result(0.1),
+        ]
+        h = Harness(tmp_path, turns=[turn])
+        await h.harness.open()
+        await h.harness.create_session()
+        events, _ = await _run(h.harness)
+
+        assert [
+            (event["type"], event["content"])
+            for event in events
+            if event["type"] in ("token", "thinking")
+        ] == [
+            ("thinking", "Hmm"),
+            ("thinking", "Hmm ok"),
+            ("token", "Answer"),
+        ]
+        assert all(event["messageId"] == "m1" for event in events)
+
+    @pytest.mark.asyncio
+    async def test_thinking_block_adopted_when_deltas_missed(self, tmp_path: Path) -> None:
+        # The authoritative ThinkingBlock text seeds the trail when the deltas
+        # never arrived (include_partial_messages off, or a dropped frame);
+        # the shorter, equal snapshot must not re-emit or shrink it.
+        h = Harness(
+            tmp_path,
+            turns=[
+                [
+                    _stream("message_start", message={"id": "msg_1"}),
+                    _text_delta("Answer"),
+                    AssistantMessage(
+                        content=[
+                            ThinkingBlock(thinking="Deep thought", signature="sig"),
+                            TextBlock("Answer"),
+                        ],
+                        model="m",
+                        message_id="msg_1",
+                    ),
+                    _result(0.1),
+                ]
+            ],
+        )
+        await h.harness.open()
+        await h.harness.create_session()
+        events, _ = await _run(h.harness)
+
+        thinking = [event for event in events if event["type"] == "thinking"]
+        assert [event["content"] for event in thinking] == ["Deep thought"]
 
     @pytest.mark.asyncio
     async def test_attachments_become_image_blocks(self, tmp_path: Path) -> None:
