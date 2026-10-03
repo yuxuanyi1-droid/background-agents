@@ -144,6 +144,46 @@ async def test_inactivity_timeout_kills_the_turn(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_one_shot_eof_wait_is_bounded_by_the_budget(tmp_path: Path) -> None:
+    # A process that closes stdout but keeps running used to leave the turn
+    # parked on process.wait() indefinitely — outside the turn's budget.
+    script = "import os, time\nos.close(1)\ntime.sleep(30)\n"
+    limits = PromptLimits(
+        inactivity_timeout_seconds=5.0,
+        prompt_max_duration_seconds=0.3,
+        prompt_cleanup_timeout_seconds=1.0,
+    )
+    harness = CliHarness(
+        vendor=_ScriptedVendor(script),  # type: ignore[arg-type]
+        log=MagicMock(),
+        limits=limits,
+        workdir=tmp_path,
+        has_repository=False,
+    )
+    async with asyncio.timeout(5):
+        outcome, _ = await _run(harness)
+    assert not outcome.success
+    assert "time budget" in (outcome.error or "")
+
+
+@pytest.mark.asyncio
+async def test_one_shot_oversize_frame_names_the_stream_not_a_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A one-shot frame past the stream limit raises ValueError out of the
+    # reader; it must become a failed turn naming the stream (and kill the
+    # process), not an exception out of run_prompt.
+    monkeypatch.setattr(cli_harness, "PROTOCOL_STREAM_LIMIT_BYTES", 1024)
+    script = "import sys, time\nsys.stdout.write('x' * 4096 + chr(10))\nsys.stdout.flush()\ntime.sleep(30)\n"
+    harness = _harness(_ScriptedVendor(script), tmp_path)
+    async with asyncio.timeout(10):
+        outcome, _ = await _run(harness)
+    assert not outcome.success
+    error = outcome.error or ""
+    assert "stream failed mid-turn" in error and "1024" in error
+
+
+@pytest.mark.asyncio
 async def test_missing_binary_is_a_deterministic_start_error(tmp_path: Path) -> None:
     harness = _harness(_ScriptedVendor("", binary="definitely-not-a-real-binary-xyz"), tmp_path)
     with pytest.raises(HarnessStartError):
@@ -489,6 +529,90 @@ async def test_resident_reader_overrun_names_the_stream_not_a_phantom_exit(
     assert "exited mid-turn" not in error
     # The wedged server must not survive into the next turn.
     assert harness._server is None
+
+
+@pytest.mark.asyncio
+async def test_resident_in_flight_server_death_settles_the_request(tmp_path: Path) -> None:
+    # A server dying while a request is in flight (here: it exits instead of
+    # answering the turn start) must settle that request with the death right
+    # away — not idle out the request timeout with "No response to prompt".
+    script = _SERVER_HEAD + "    elif kind == 'prompt':\n        sys.exit(3)\n"
+    harness = _harness(_ResidentScriptVendor(script), tmp_path)
+    await harness.create_session()
+    async with asyncio.timeout(5):
+        outcome, _ = await _run(harness)
+    assert not outcome.success
+    error = outcome.error or ""
+    assert "exited mid-turn" in error and "code 3" in error
+    assert "No response" not in error
+
+
+@pytest.mark.asyncio
+async def test_resident_handshake_wedge_is_a_turn_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A server that never answers its handshake must fail the turn naming the
+    # request, not raise out of run_prompt.
+    monkeypatch.setattr(cli_harness, "PROTOCOL_REQUEST_TIMEOUT_SECONDS", 0.3)
+
+    class _WedgedVendor(_ResidentScriptVendor):
+        def handshake_requests(self) -> list[dict[str, Any]]:
+            return [{"type": "hello"}]
+
+    harness = _harness(_WedgedVendor(_SERVER_HEAD), tmp_path)
+    await harness.create_session()
+    async with asyncio.timeout(5):
+        outcome, _ = await _run(harness)
+    assert not outcome.success
+    assert "No response to hello" in (outcome.error or "")
+    assert harness._server is None
+
+
+@pytest.mark.asyncio
+async def test_resident_missing_binary_is_a_turn_failure(tmp_path: Path) -> None:
+    # A resident harness whose CLI vanished between open() and the turn must
+    # return a start failure, not raise out of run_prompt.
+    vendor = _ResidentScriptVendor("")
+    vendor.binary = "definitely-not-a-real-binary-xyz"
+    harness = _harness(vendor, tmp_path)
+    await harness.create_session()
+    outcome, _ = await _run(harness)
+    assert not outcome.success
+    assert "not installed" in (outcome.error or "")
+    assert harness._server is None
+
+
+@pytest.mark.asyncio
+async def test_resident_stale_reader_server_is_restarted_not_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A reader failure can outlive its process: the server settles a turn,
+    # then its stdout overruns (reader dies) while the process lingers. The
+    # next turn must restart the server — talking to the zombie would idle
+    # out the request timeout — and succeed.
+    monkeypatch.setattr(cli_harness, "PROTOCOL_STREAM_LIMIT_BYTES", 1024)
+    script = (
+        _SERVER_HEAD + "    elif kind == 'prompt':\n"
+        "        send({'id': message['id'], 'result': {'accepted': True}})\n"
+        "        send({'type': 'delta', 'text': 'ok'})\n"
+        "        send({'type': 'done'})\n"
+        "        send({'type': 'delta', 'text': 'z' * 4096})\n"
+        "        import time\n"
+        "        time.sleep(30)\n"
+    )
+    harness = _harness(_ResidentScriptVendor(script), tmp_path)
+    await harness.create_session()
+    outcome, _ = await _run(harness)
+    assert outcome.success
+    stale = harness._server
+    assert stale is not None
+    await asyncio.sleep(0.2)  # let the reader hit the overrun
+
+    async with asyncio.timeout(10):
+        outcome, _ = await _run(harness)
+    assert outcome.success
+    assert harness._server is not None and harness._server is not stale
+    await harness.close()
 
 
 @pytest.mark.asyncio

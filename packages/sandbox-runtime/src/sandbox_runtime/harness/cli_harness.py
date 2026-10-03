@@ -64,6 +64,13 @@ SETUP_REQUEST_LIMIT = 4
 # frame larger than that raises out of the reader and used to be reported as a
 # server death ("exited mid-turn (code None)") while the process was alive.
 PROTOCOL_STREAM_LIMIT_BYTES = 16 * 1024 * 1024
+# Default bound on one protocol request (handshake, setup, turn start) waiting
+# for its response: a server that stays silent must fail the turn, not wedge it.
+PROTOCOL_REQUEST_TIMEOUT_SECONDS = 30.0
+# A closed stdout almost always means the process just exited; this is how long
+# the reader waits for the exit code to be reaped before reporting the death
+# without one.
+SERVER_EXIT_REAP_GRACE_SECONDS = 1.0
 
 
 @dataclass
@@ -175,9 +182,11 @@ class ResidentCliVendor(Protocol):
     until the vendor raises :class:`CliTurnSettled`.
     """
 
-    resident = True
+    id: HarnessId
+    binary: str
+    resident: bool = True
 
-    jsonrpc = True
+    jsonrpc: bool = True
     """Whether requests carry the JSON-RPC 2.0 envelope field. Vendors whose
     wire schema rejects unknown keys (ZCode) or speaks command-shaped frames
     (Pi) clear it."""
@@ -281,6 +290,13 @@ class ResidentCliVendor(Protocol):
         start marks the previous run's true end — the point a fresh prompt is
         accepted again. Its preceding tail belongs to the turn that already
         settled and is discarded."""
+        ...
+
+    def exit_outcome(
+        self, state: CliTurnState, returncode: int | None, stderr_tail: str
+    ) -> TurnOutcome:
+        """The turn's result from its final state and exit code (the resident
+        path settles through the protocol, so there is no exit code)."""
         ...
 
 
@@ -524,7 +540,38 @@ class _ResidentServer:
 
     @property
     def alive(self) -> bool:
-        return self._process is not None and self._process.returncode is None
+        # A server whose stdout reader has stopped is unusable even while its
+        # process lingers: no response can ever be correlated again, so the
+        # next turn must restart it instead of talking into the void.
+        if self._process is None or self._process.returncode is not None:
+            return False
+        reader = self._reader_task
+        return reader is not None and not reader.done()
+
+    def death_detail(self) -> str:
+        """The failure text for a server that stopped mid-turn: a reader
+        failure (the process may still be running) outranks an exit, and the
+        exit code is read live (None while not yet reaped)."""
+        if self._reader_error:
+            detail = (
+                f"The {self._vendor.id.value} protocol server stream failed mid-turn "
+                f"({self._reader_error}); the server process was still running."
+            )
+        else:
+            code = self._process.returncode if self._process is not None else None
+            detail = f"The {self._vendor.id.value} protocol server exited mid-turn (code {code})."
+        if self._stderr_tail:
+            detail += f" Stderr tail: {self._stderr_tail[-STDERR_TAIL_CHARS:]}"
+        return detail
+
+    def _fail_pending(self, error: CliServerDied) -> None:
+        """Settle every in-flight request with the given failure, so an
+        awaiting :meth:`request` never idles out its own timeout after the
+        server is gone."""
+        for future in self._pending.values():
+            if not future.done():
+                future.set_exception(error)
+        self._pending.clear()
 
     @property
     def stderr_tail(self) -> str:
@@ -604,6 +651,10 @@ class _ResidentServer:
                     self._reader_error = f"{type(error).__name__}: {error}"
                     return
                 if not line:
+                    # stdout closed: the server is done talking. Give the OS a
+                    # moment to reap it so the death message can name the exit
+                    # code; a lingering process must not stall the report.
+                    await self._await_exit_code()
                     return
                 text = line.decode("utf-8", errors="replace").strip()
                 if not text:
@@ -628,7 +679,21 @@ class _ResidentServer:
                     await self._write_frame(reply)
                 self._notifications.put_nowait(message)
         finally:
+            # Whatever ended the reader — an exit, a stream failure, a kill —
+            # the server can answer nothing more: settle the in-flight requests
+            # with the death before the turn loop sees the exit marker.
+            self._fail_pending(CliServerDied(self.death_detail()))
             self._notifications.put_nowait(_SERVER_EXITED)
+
+    async def _await_exit_code(self) -> None:
+        """Wait briefly for a just-exited server to be reaped, so the death
+        message can name its exit code instead of a phantom ``None``."""
+        process = self._process
+        if process is None or process.returncode is not None:
+            return
+        with contextlib.suppress(Exception):
+            async with asyncio.timeout(SERVER_EXIT_REAP_GRACE_SECONDS):
+                await process.wait()
 
     async def _write_frame(self, frame: dict[str, Any]) -> None:
         process = self._process
@@ -650,11 +715,17 @@ class _ResidentServer:
             tail.append(line.decode("utf-8", errors="replace").rstrip())
             self._stderr_tail = "\n".join(tail)[-4096:]
 
-    async def request(self, payload: dict[str, Any], timeout: float = 30.0) -> dict[str, Any]:
+    async def request(
+        self, payload: dict[str, Any], timeout: float | None = None
+    ) -> dict[str, Any]:
         """Send one request and await its correlated response."""
         process = self._process
         if process is None or process.stdin is None or not self.alive:
-            raise RuntimeError("The vendor protocol server is not running.")
+            # A turn failure with the real cause, not an exception out of
+            # run_prompt; the caller kills whatever process remains.
+            raise CliServerDied(f"The {self._vendor.id.value} protocol server is not running.")
+        if timeout is None:
+            timeout = PROTOCOL_REQUEST_TIMEOUT_SECONDS
         self._rpc_id += 1
         request_id = f"oi-{self._rpc_id}"
         envelope: dict[str, Any] = {"id": request_id}
@@ -702,6 +773,9 @@ class _ResidentServer:
         if process is None:
             return
         self._process = None
+        self._fail_pending(
+            CliServerDied(f"The {self._vendor.id.value} protocol server was stopped mid-turn.")
+        )
         for task in (self._reader_task, self._stderr_task):
             if task is not None:
                 task.cancel()
@@ -837,7 +911,7 @@ class CliHarness:
         self._process = process
         assert process.stdout is not None and process.stderr is not None
         stderr_task = asyncio.create_task(process.stderr.read())
-        timeout_error: Exception | None = None
+        failure: Exception | None = None
         returncode: int | None = None
         try:
             async with asyncio.timeout(budget):
@@ -845,9 +919,12 @@ class CliHarness:
                     await self._consume_jsonl(process.stdout, state, emit)
                 else:
                     await self._consume_text(process.stdout, state, emit)
-            returncode = await process.wait()
+                # After stdout closes the process should exit at once; a
+                # lingering child must still be bounded by the turn's budget
+                # instead of parking the turn on wait() forever.
+                returncode = await process.wait()
         except (TimeoutError, CliPromptTimeout) as error:
-            timeout_error = (
+            failure = (
                 error
                 if isinstance(error, CliPromptTimeout)
                 else CliPromptTimeout("The turn exceeded its time budget.")
@@ -855,7 +932,11 @@ class CliHarness:
             await _terminate_process(process)
             returncode = process.returncode
         except CliInactivityTimeout as error:
-            timeout_error = error
+            failure = error
+            await _terminate_process(process)
+            returncode = process.returncode
+        except CliServerDied as error:
+            failure = error
             await _terminate_process(process)
             returncode = process.returncode
         except asyncio.CancelledError:
@@ -871,8 +952,8 @@ class CliHarness:
             if not stderr_task.done():
                 stderr_task.cancel()
         stderr_tail = _decode_tail(stderr_task) if stderr_task.done() else ""
-        if timeout_error is not None:
-            return TurnOutcome.failed(str(timeout_error), message_cost_usd=state.cost_usd)
+        if failure is not None:
+            return TurnOutcome.failed(str(failure), message_cost_usd=state.cost_usd)
         await emit(step_finish_event(state, reason="completed"))
         return self.vendor.exit_outcome(state, returncode, stderr_tail)
 
@@ -891,21 +972,36 @@ class CliHarness:
         normally leaves it running for the next one.
         """
         server = self._server
-        if server is None or not server.alive:
-            if server is not None:
-                await server.kill()
+        if server is not None and not server.alive:
+            await server.kill()
+            self._server = None
+            server = None
+        if server is None:
             server = _ResidentServer(self.vendor, self.log)  # type: ignore[arg-type]
-            await server.start(
-                self.workdir,
-                session_id=self.session_id,
-                model=prompt.model,
-                reasoning_effort=prompt.reasoning_effort,
-            )
+            try:
+                await server.start(
+                    self.workdir,
+                    session_id=self.session_id,
+                    model=prompt.model,
+                    reasoning_effort=prompt.reasoning_effort,
+                )
+            except FileNotFoundError:
+                await server.kill()
+                return TurnOutcome.failed(f"The {self.vendor.binary} CLI is not installed.")
+            except (CliServerDied, CliPromptTimeout) as error:
+                # A server that dies or never answers its handshake before the
+                # turn even starts is a failed turn with the real reason — not
+                # an exception out of run_prompt.
+                await server.kill()
+                return TurnOutcome.failed(str(error), message_cost_usd=state.cost_usd)
+            except asyncio.CancelledError:
+                await server.kill()
+                raise
             self._server = server
         server.drop_queued_notifications()
         self._abort_requested = False
         vendor: ResidentCliVendor = self.vendor  # type: ignore[assignment]
-        timeout_error: Exception | None = None
+        failure: Exception | None = None
         try:
             async with asyncio.timeout(budget):
                 # One setup request at a time, each seeing the latest adopted
@@ -923,21 +1019,21 @@ class CliHarness:
                     if message is None:
                         break
                     response = await server.request(message)
-                    failure = _response_error(response)
+                    response_failure = _response_error(response)
                     if (
-                        failure is not None
+                        response_failure is not None
                         and not recovered_contention
-                        and vendor.setup_lock_contention(failure)
+                        and vendor.setup_lock_contention(response_failure)
                     ):
                         # Another live process still owns the conversation
                         # (an orphan this bridge never reaped); the request
                         # can only succeed once it is dead.
                         recovered_contention = True
                         response = await self._sweep_lock_holder_and_retry(server, message)
-                        failure = _response_error(response)
-                    if failure is not None:
+                        response_failure = _response_error(response)
+                    if response_failure is not None:
                         return TurnOutcome.failed(
-                            f"{_request_label(message)}: {failure}",
+                            f"{_request_label(message)}: {response_failure}",
                             message_cost_usd=state.cost_usd,
                         )
                     adopted = vendor.adopt_response_id(response)
@@ -966,8 +1062,10 @@ class CliHarness:
                         f"The {self.vendor.id.value} conversation could not be started."
                     )
                 response = await server.request(start)
-                failure = _response_error(response)
-                if failure is not None and vendor.turn_start_busy_failure(failure):
+                response_failure = _response_error(response)
+                if response_failure is not None and vendor.turn_start_busy_failure(
+                    response_failure
+                ):
                     # The previous turn settled on its final answer while the
                     # vendor was still finishing run work (a retry, a
                     # compaction); it rejects a new prompt until that run
@@ -976,31 +1074,31 @@ class CliHarness:
                     # resubmitted once it is over.
                     await self._drop_until_previous_run_settled(server, vendor)
                     response = await server.request(start)
-                    failure = _response_error(response)
-                if failure is not None:
+                    response_failure = _response_error(response)
+                if response_failure is not None:
                     return TurnOutcome.failed(
-                        f"{_request_label(start)}: {failure}",
+                        f"{_request_label(start)}: {response_failure}",
                         message_cost_usd=state.cost_usd,
                     )
                 await self._consume_server_notifications(server, state, emit)
         except (TimeoutError, CliPromptTimeout) as error:
-            timeout_error = (
+            failure = (
                 error
                 if isinstance(error, CliPromptTimeout)
                 else CliPromptTimeout("The turn exceeded its time budget.")
             )
         except CliInactivityTimeout as error:
-            timeout_error = error
+            failure = error
         except CliServerDied as error:
-            timeout_error = error
+            failure = error
         except asyncio.CancelledError:
             await server.kill()
             raise
-        if timeout_error is not None:
+        if failure is not None:
             # The server may still be mid-turn; the next turn restarts it.
             await server.kill()
             self._server = None
-            return TurnOutcome.failed(str(timeout_error), message_cost_usd=state.cost_usd)
+            return TurnOutcome.failed(str(failure), message_cost_usd=state.cost_usd)
         await emit(step_finish_event(state, reason="completed"))
         return vendor.exit_outcome(state, 0, "")
 
@@ -1094,18 +1192,10 @@ class CliHarness:
     async def _server_death_error(self, server: _ResidentServer) -> CliServerDied:
         """The failure describing a server that died mid-turn, naming a
         reader failure (the process may still be running) over an exit."""
-        code, tail = await server.exit_details()
-        reader_error = server.reader_error
-        if reader_error:
-            detail = (
-                f"The {self.id.value} protocol server stream failed mid-turn "
-                f"({reader_error}); the server process was still running."
-            )
-        else:
-            detail = f"The {self.id.value} protocol server exited mid-turn (code {code})."
-        if tail:
-            detail += f" Stderr tail: {tail[-STDERR_TAIL_CHARS:]}"
-        return CliServerDied(detail)
+        # exit_details bounds its wait for a just-exited process, so the code
+        # named below is the real one whenever the OS has it.
+        await server.exit_details()
+        return CliServerDied(server.death_detail())
 
     async def _consume_jsonl(
         self, stream: asyncio.StreamReader, state: CliTurnState, emit: EventSink
@@ -1118,6 +1208,14 @@ class CliHarness:
             except TimeoutError as error:
                 raise CliInactivityTimeout(
                     f"No output for {self.limits.inactivity_timeout_seconds:.0f}s."
+                ) from error
+            except ValueError as error:
+                # A frame larger than the stream limit; the vendor is still
+                # running but its output can no longer be read. Name the real
+                # cause — the caller terminates the process.
+                raise CliServerDied(
+                    f"The {self.id.value} output stream failed mid-turn "
+                    f"(frame exceeded {PROTOCOL_STREAM_LIMIT_BYTES} bytes: {error})."
                 ) from error
             if not line:
                 return
