@@ -212,6 +212,39 @@ class TestCodexAppServer:
         assert reply["error"]["code"] == -32601
         assert vendor.server_request_messages({"method": "turn/started"}) == []
 
+    def test_integer_request_ids_are_answered(self) -> None:
+        # The app-server numbers its server→client requests with integers
+        # (0, 1, ...); an approval request no client answers hangs the turn.
+        vendor = CodexVendor()
+        (reply,) = vendor.server_request_messages(
+            {"id": 0, "method": "item/commandExecution/requestApproval", "params": {}}
+        )
+        assert reply["id"] == 0
+        assert reply["error"]["code"] == -32601
+        assert vendor.server_request_messages({"id": None, "method": "agent/ask"}) == []
+
+    def test_thread_setup_pins_unattended_sandbox_and_approval(self) -> None:
+        # The exec path passes --dangerously-bypass-approvals-and-sandbox;
+        # the app-server path must request the same handling per thread or
+        # every edit blocks on an approval nobody answers.
+        vendor = CodexVendor()
+        start = vendor.next_setup_message(
+            session_id=None, model=None, reasoning_effort=None, workdir=WORKDIR
+        )
+        assert start is not None
+        assert start["params"]["config"] == {
+            "sandbox_mode": "danger-full-access",
+            "approval_policy": "never",
+        }
+        resume = vendor.next_setup_message(
+            session_id="t-9", model=None, reasoning_effort=None, workdir=WORKDIR
+        )
+        assert resume is not None
+        assert resume["params"]["config"] == {
+            "sandbox_mode": "danger-full-access",
+            "approval_policy": "never",
+        }
+
     def test_writer_lock_rejection_is_recognized(self) -> None:
         # rollout's writer lock is held for the thread's live lifetime by one
         # app-server process; a resume reaching another process's lock is the
@@ -524,6 +557,94 @@ class TestZcodeAppServer:
             )
             == []
         )
+
+    def test_streaming_text_and_tool_input_merge_into_the_turn(self) -> None:
+        # model.streaming is the only carrier of incremental assistant text;
+        # a tool's complete input arrives on its tool_call frame and is then
+        # omitted from the lifecycle frame (inputOmitted/inputRef).
+        vendor = ZcodeVendor()
+        state = _state()
+        assert vendor.parse_server_message(
+            self._session_event("model.streaming", {"kind": "text_delta", "delta": "Hel"}),
+            state,
+        ) == [
+            {"type": "step_start", "messageId": "m1", "stepId": state.step_id},
+            {"type": "token", "content": "Hel", "messageId": "m1"},
+        ]
+        tokens = vendor.parse_server_message(
+            self._session_event("model.streaming", {"kind": "text_delta", "delta": "lo"}),
+            state,
+        )
+        assert [e["content"] for e in tokens if e["type"] == "token"] == ["Hello"]
+        assert (
+            vendor.parse_server_message(
+                self._session_event("model.streaming", {"kind": "reasoning_delta", "delta": "hmm"}),
+                state,
+            )
+            == []
+        )
+        assert (
+            vendor.parse_server_message(
+                self._session_event(
+                    "model.streaming",
+                    {
+                        "kind": "tool_call",
+                        "toolCallId": "tc-1",
+                        "toolName": "Write",
+                        "input": {"path": "a.py"},
+                    },
+                ),
+                state,
+            )
+            == []
+        )
+        # The scheduled frame omits the streamed input; the cached one merges.
+        scheduled = vendor.parse_server_message(
+            self._session_event(
+                "tool.updated",
+                {
+                    "kind": "scheduled",
+                    "toolCallId": "tc-1",
+                    "toolName": "Write",
+                    "inputOmitted": True,
+                    "inputRef": "model_stream",
+                },
+            ),
+            state,
+        )
+        tool_call = next(e for e in scheduled if e["type"] == "tool_call")
+        assert tool_call["tool"] == "Write"
+        assert tool_call["args"] == {"path": "a.py"}
+
+    def test_completed_response_does_not_duplicate_streamed_text(self) -> None:
+        vendor = ZcodeVendor()
+        state = _state()
+        vendor.parse_server_message(
+            self._session_event("model.streaming", {"kind": "text_delta", "delta": "Hello"}),
+            state,
+        )
+        with pytest.raises(CliTurnSettled) as settled:
+            vendor.parse_server_message(
+                self._session_event("turn.completed", {"response": "Hello"}), state
+            )
+        assert [e for e in settled.value.events if e["type"] == "token"] == []
+        assert state.text == "Hello"
+
+    def test_prompt_already_running_is_recognized_as_busy(self) -> None:
+        vendor = ZcodeVendor()
+        assert vendor.turn_start_busy_failure("A prompt is already running for this session")
+        assert not vendor.turn_start_busy_failure("Subagent sessions are read-only")
+        assert not vendor.setup_lock_contention("A prompt is already running for this session")
+        assert vendor.previous_run_settled(
+            {"method": "state.updated", "params": {"reason": "prompt_completed"}}
+        )
+        assert vendor.previous_run_settled(
+            {"method": "state.updated", "params": {"reason": "prompt_failed"}}
+        )
+        assert not vendor.previous_run_settled(
+            {"method": "state.updated", "params": {"reason": "accepted"}}
+        )
+        assert not vendor.previous_run_settled({"method": "session/event"})
 
     def test_turn_failed_settles_with_the_error_event(self) -> None:
         vendor = ZcodeVendor()

@@ -22,7 +22,7 @@ from __future__ import annotations
 import time
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 from ..custom_providers import (
     codex_model_catalog_path,
@@ -62,7 +62,7 @@ def _pi_thinking_level(effort: str) -> str:
     return "off" if effort == "none" else effort
 
 
-def _jsonrpc_unattended_reply_error(request_id: str, method: str) -> dict[str, Any]:
+def _jsonrpc_unattended_reply_error(request_id: str | int, method: str) -> dict[str, Any]:
     # Answering with a protocol error releases the server's pending request
     # instead of hanging the turn on input no interactive client will give.
     return {
@@ -71,10 +71,18 @@ def _jsonrpc_unattended_reply_error(request_id: str, method: str) -> dict[str, A
     }
 
 
+def _is_request_id(value: Any) -> TypeGuard[str | int]:
+    # JSON-RPC ids are strings or integers; codex's app-server numbers
+    # server→client requests with integers (0, 1, ...).
+    return (isinstance(value, str) and value != "") or (
+        isinstance(value, int) and not isinstance(value, bool)
+    )
+
+
 def _jsonrpc_unattended_reply(message: dict[str, Any]) -> list[dict[str, Any]]:
     request_id = message.get("id")
     method = message.get("method")
-    if not (isinstance(request_id, str) and isinstance(method, str)):
+    if not (_is_request_id(request_id) and isinstance(method, str)):
         return []
     return [_jsonrpc_unattended_reply_error(request_id, method)]
 
@@ -226,12 +234,22 @@ class CodexVendor:
         if session_id and session_id == self._live_thread_id:
             return None
         bare = _bare_model(model)
+        # Unattended, the config twin of the exec path's
+        # --dangerously-bypass-approvals-and-sandbox: without it the
+        # app-server builds the thread with its defaults (read-only sandbox,
+        # approvals on request), so edits block on an approval nobody answers
+        # and escalated commands are denied.
+        config: dict[str, Any] = {
+            "sandbox_mode": "danger-full-access",
+            "approval_policy": "never",
+        }
         params: dict[str, Any] = {"cwd": str(workdir)}
         if model_provider:
             params["modelProvider"] = model_provider
             # Same per-turn catalog the exec path passes as -c: the routed
             # model's metadata, so the CLI does not fall back and warn.
-            params["config"] = {"model_catalog_json": str(codex_model_catalog_path())}
+            config["model_catalog_json"] = str(codex_model_catalog_path())
+        params["config"] = config
         if bare:
             params["model"] = bare
         if session_id:
@@ -918,8 +936,21 @@ class ZcodeVendor:
             return []
         if kind == "tool.updated":
             return self._tool_updated_events(payload, state)
+        if kind == "model.streaming":
+            return self._streaming_events(payload, state)
         if kind == "turn.completed":
-            events = text_events(state, str(payload.get("response") or ""))
+            response = str(payload.get("response") or "")
+            # The response is the last step's full text: the live stream
+            # usually delivered it already (keep), it may extend a streamed
+            # prefix (replace), and only when the stream missed it entirely
+            # is it appended to earlier steps' text.
+            events: list[Any] = []
+            if response and not state.text.endswith(response):
+                events = (
+                    text_events(state, response)
+                    if response.startswith(state.text)
+                    else append_text_events(state, response)
+                )
             usage = payload.get("usage")
             if isinstance(usage, dict):
                 state.tokens = _usage_tokens(usage)
@@ -930,16 +961,42 @@ class ZcodeVendor:
             raise CliTurnSettled(error_event(state, detail))
         return []
 
+    def _streaming_events(self, payload: dict[str, Any], state: CliTurnState) -> list[Any]:
+        """The model's live stream: the only carrier of incremental assistant
+        text, and of each tool's complete input.
+
+        A tool's full input arrives once on its ``tool_call`` frame; the later
+        lifecycle frame (``tool.updated`` scheduled) then omits it
+        (``inputOmitted``/``inputRef == "model_stream"``), so the input is
+        cached here for that merge.
+        """
+        stream_kind = payload.get("kind")
+        if stream_kind == "text_delta":
+            delta = payload.get("delta")
+            if isinstance(delta, str) and delta:
+                return append_text_events(state, delta)
+            return []
+        if stream_kind == "tool_call":
+            call_id = payload.get("toolCallId")
+            tool_input = payload.get("input")
+            if isinstance(call_id, str) and call_id and isinstance(tool_input, dict):
+                state.tool_args[call_id] = tool_input
+        return []
+
     def _tool_updated_events(self, payload: dict[str, Any], state: CliTurnState) -> list[Any]:
         call_id = str(payload.get("toolCallId") or "tool")
         kind = payload.get("kind")
         if kind in ("scheduled", "started"):
-            args = payload.get("input") if isinstance(payload.get("input"), dict) else {}
+            args = payload.get("input")
+            if not isinstance(args, dict):
+                # The frame omitted the input because the stream already
+                # carried it; the cached value is the same one.
+                args = state.tool_args.get(call_id)
             return tool_events(
                 state,
                 call_id=call_id,
                 name=str(payload.get("toolName") or "tool"),
-                args=args,
+                args=args if isinstance(args, dict) else {},
                 status="running",
             )
         if kind == "result":
@@ -972,7 +1029,7 @@ class ZcodeVendor:
     def server_request_messages(self, message: dict[str, Any]) -> list[dict[str, Any]]:
         request_id = message.get("id")
         method = message.get("method")
-        if not (isinstance(request_id, str) and isinstance(method, str)):
+        if not (_is_request_id(request_id) and isinstance(method, str)):
             return []
         if method == "interaction/requestPermission":
             # Unattended: deny so the turn continues past the refused tool —
@@ -991,10 +1048,19 @@ class ZcodeVendor:
         return False
 
     def turn_start_busy_failure(self, failure: str) -> bool:
-        return False
+        # -32010: the previous turn's worker still holds the session's active
+        # controller, which it clears only after the terminal turn event; a
+        # send inside that window is rejected until the run truly ends.
+        return "already running" in failure
 
     def previous_run_settled(self, message: dict[str, Any]) -> bool:
-        return False
+        # prompt_completed/prompt_failed are the vendor's own "ready"
+        # boundary: the active controller is released before they broadcast.
+        if message.get("method") != "state.updated":
+            return False
+        params = message.get("params")
+        reason = params.get("reason") if isinstance(params, dict) else None
+        return reason in ("prompt_completed", "prompt_failed")
 
     def parse_record(self, record: dict[str, Any], state: CliTurnState) -> list[Any]:
         return []
