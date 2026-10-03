@@ -1129,12 +1129,55 @@ class TestPi:
     def test_compaction_and_title(self) -> None:
         vendor = PiVendor()
         state = _state()
-        assert vendor.parse_record({"type": "compaction_end"}, state) == [
-            {"type": "context_compacted", "messageId": "m1"}
-        ]
+        assert vendor.parse_record(
+            {"type": "compaction_end", "result": {"summary": "trimmed"}, "aborted": False},
+            state,
+        ) == [{"type": "context_compacted", "messageId": "m1"}]
         assert vendor.parse_record({"type": "session_info_changed", "name": "Fix"}, state) == [
             {"type": "session_title", "title": "Fix"}
         ]
+
+    def test_failed_or_aborted_compactions_do_not_report(self) -> None:
+        # Pi emits compaction_end for failed and cancelled attempts too, with
+        # `result` undefined plus an errorMessage; nothing was compacted.
+        vendor = PiVendor()
+        state = _state()
+        assert (
+            vendor.parse_record(
+                {"type": "compaction_end", "aborted": True, "errorMessage": "cancelled"},
+                state,
+            )
+            == []
+        )
+        assert (
+            vendor.parse_record(
+                {"type": "compaction_end", "reason": "overflow", "errorMessage": "server error"},
+                state,
+            )
+            == []
+        )
+
+    def test_argv_keeps_an_at_leading_prompt_as_text(self) -> None:
+        # Pi expands a positional starting with "@" into a file attachment
+        # even after "--", which would turn the whole prompt into a file
+        # reference; the leading space keeps it as prompt text.
+        vendor = PiVendor()
+        argv = vendor.build_argv(
+            session_id="abc-123",
+            prompt_text="@agent review this",
+            model=None,
+            reasoning_effort=None,
+            workdir=WORKDIR,
+        )
+        assert argv[-2:] == ["--", " @agent review this"]
+        plain = vendor.build_argv(
+            session_id=None,
+            prompt_text="hello",
+            model=None,
+            reasoning_effort=None,
+            workdir=WORKDIR,
+        )
+        assert plain[-2:] == ["--", "hello"]
 
     def test_assistant_message_end_carries_the_failure_signal(self) -> None:
         # Pi exits 0 even when the provider rejects the turn; the assistant

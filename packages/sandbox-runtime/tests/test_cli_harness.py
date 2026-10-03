@@ -557,6 +557,47 @@ async def test_resident_server_death_fails_fast_with_exit_details(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_resident_startup_exit_surfaces_the_stderr_reason(tmp_path: Path) -> None:
+    # A server that dies before answering anything (pi with an unknown model
+    # id exits at startup) leaves the reason only on stderr; the first setup
+    # request must fail with that detail instead of a static "not running"
+    # message or the request timeout.
+    script = (
+        "import sys\n"
+        "print('Error: Model \"some/model\" not found. Use --list-models.', file=sys.stderr)\n"
+        "sys.exit(1)\n"
+    )
+    harness = _harness(_ResidentScriptVendor(script), tmp_path)
+    await harness.create_session()
+    outcome, _ = await _run(harness)
+    assert not outcome.success
+    error = outcome.error or ""
+    assert "code 1" in error and "Model" in error and "--list-models" in error
+
+
+@pytest.mark.asyncio
+async def test_request_on_a_dead_server_names_the_startup_failure(tmp_path: Path) -> None:
+    # A server that already exited and was reaped before the request (reader
+    # done) must still fail with the death details — exit code and stderr
+    # reason — not the static "not running" message.
+    script = (
+        "import sys\n"
+        "print('Error: Model \"some/model\" not found. Use --list-models.', file=sys.stderr)\n"
+        "sys.exit(1)\n"
+    )
+    server = cli_harness._ResidentServer(_ResidentScriptVendor(script), MagicMock())
+    await server.start(tmp_path, session_id=None, model="some/model", reasoning_effort=None)
+    async with asyncio.timeout(5):
+        while server.alive or not server.stderr_tail:
+            await asyncio.sleep(0.02)
+    with pytest.raises(cli_harness.CliServerDied) as excinfo:
+        await server.request({"type": "ensure"})
+    error = str(excinfo.value)
+    assert "code 1" in error and "Model" in error and "--list-models" in error
+    await server.kill()
+
+
+@pytest.mark.asyncio
 async def test_resident_server_survives_an_oversize_frame(tmp_path: Path) -> None:
     # asyncio's default 64 KiB readline cap used to turn one large protocol
     # frame into a phantom "server exited mid-turn (code None)".

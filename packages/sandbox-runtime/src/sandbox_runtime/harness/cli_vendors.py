@@ -557,6 +557,12 @@ class PiVendor:
             argv += ["--model", model]
         if reasoning_effort:
             argv += ["--thinking", _pi_thinking_level(reasoning_effort)]
+        # Pi turns a positional starting with "@" into a file attachment even
+        # after "--" (its arg parser scans the tail for the prefix), which
+        # would swallow the whole prompt; a leading space keeps a prompt that
+        # itself starts with "@" as prompt text.
+        if prompt_text.startswith("@"):
+            prompt_text = f" {prompt_text}"
         argv += ["--", prompt_text]
         return argv
 
@@ -716,7 +722,12 @@ class PiVendor:
                 output=_pi_result_text(record.get("result")),
             )
         if kind == "compaction_end":
-            return [{"type": "context_compacted", "messageId": state.message_id}]
+            # Failed and aborted attempts emit the same event with `result`
+            # undefined plus an errorMessage; only a successful compaction
+            # carries a result and actually compacted the context.
+            if isinstance(record.get("result"), dict):
+                return [{"type": "context_compacted", "messageId": state.message_id}]
+            return []
         if kind == "session_info_changed":
             name = record.get("name")
             if isinstance(name, str) and name:

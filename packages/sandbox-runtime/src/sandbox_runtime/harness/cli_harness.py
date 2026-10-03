@@ -582,6 +582,16 @@ class _ResidentServer:
             detail += f" Stderr tail: {self._stderr_tail[-STDERR_TAIL_CHARS:]}"
         return detail
 
+    async def death_error(self) -> CliServerDied:
+        """The failure to report for a server that can no longer serve.
+
+        A reader failure needs no wait — the process may still be running and
+        has no exit code to reap — while an exit gets its bounded moment so
+        the message can name the real code."""
+        if self.reader_error is None:
+            await self.exit_details()
+        return CliServerDied(self.death_detail())
+
     def _fail_pending(self, error: CliServerDied) -> None:
         """Settle every in-flight request with the given failure, so an
         awaiting :meth:`request` never idles out its own timeout after the
@@ -738,10 +748,15 @@ class _ResidentServer:
     ) -> dict[str, Any]:
         """Send one request and await its correlated response."""
         process = self._process
-        if process is None or process.stdin is None or not self.alive:
+        if process is None or process.stdin is None:
             # A turn failure with the real cause, not an exception out of
             # run_prompt; the caller kills whatever process remains.
             raise CliServerDied(f"The {self._vendor.id.value} protocol server is not running.")
+        if not self.alive:
+            # Dead before the request — a startup failure (an unknown model
+            # exits pi at once) leaves its reason only on stderr, so the
+            # failure carries the death details, not a static message.
+            raise await self.death_error()
         if timeout is None:
             timeout = PROTOCOL_REQUEST_TIMEOUT_SECONDS
         self._rpc_id += 1
@@ -756,6 +771,10 @@ class _ResidentServer:
             process.stdin.write((json.dumps(payload) + "\n").encode())
             await process.stdin.drain()
             return await asyncio.wait_for(future, timeout)
+        except ConnectionError:
+            # The pipe broke because the server exited between the liveness
+            # check and this write; report the death, not the bare pipe error.
+            raise await self.death_error() from None
         except TimeoutError:
             # Name the request: an unanswered one must not read as the turn's
             # own budget running out.
@@ -1165,8 +1184,7 @@ class CliHarness:
                     # that exits immediately after delivering it (observed on
                     # pi 0.87.1) must not fail a complete turn.
                     return
-                error = await self._server_death_error(server)
-                raise error
+                raise await server.death_error()
             # Reverse requests were already answered by the reader; here they
             # only feed the vendor's translation.
             try:
@@ -1197,8 +1215,7 @@ class CliHarness:
                     f"the {self.id.value} agent finished its previous run."
                 )
             if message is _SERVER_EXITED:
-                error = await self._server_death_error(server)
-                raise error
+                raise await server.death_error()
             if vendor.previous_run_settled(message):
                 return
 
@@ -1223,14 +1240,6 @@ class CliHarness:
                 killed_pids=killed,
             )
         return await server.request(message)
-
-    async def _server_death_error(self, server: _ResidentServer) -> CliServerDied:
-        """The failure describing a server that died mid-turn, naming a
-        reader failure (the process may still be running) over an exit."""
-        # exit_details bounds its wait for a just-exited process, so the code
-        # named below is the real one whenever the OS has it.
-        await server.exit_details()
-        return CliServerDied(server.death_detail())
 
     async def _consume_jsonl(
         self, stream: asyncio.StreamReader, state: CliTurnState, emit: EventSink
