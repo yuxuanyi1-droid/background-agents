@@ -500,11 +500,21 @@ async def _terminate_process(process: asyncio.subprocess.Process) -> None:
     and forwards only SIGINT/SIGTERM/SIGHUP, so killing the launcher alone
     would leave the real server — the one holding the conversation's writer
     lock — running.
+
+    The child leads its own session, so its pid *is* its process-group id.
+    That is used directly instead of ``os.getpgid``, which fails once the
+    child has been reaped — exactly when surviving group members still need
+    the signal (a launcher can exit before the server it spawned).
     """
+    pgid = process.pid
     if process.returncode is not None:
+        # The direct child is already gone, but a group member it spawned may
+        # have outlived it; SIGKILL the group so nothing behind it survives.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pgid, signal.SIGKILL)
         return
     try:
-        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        os.killpg(pgid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         with contextlib.suppress(ProcessLookupError):
             process.terminate()
@@ -512,7 +522,7 @@ async def _terminate_process(process: asyncio.subprocess.Process) -> None:
         await asyncio.wait_for(process.wait(), KILL_GRACE_SECONDS)
     except TimeoutError:
         try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            os.killpg(pgid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             with contextlib.suppress(ProcessLookupError):
                 process.kill()
@@ -1026,9 +1036,12 @@ class CliHarness:
             async with asyncio.timeout_at(turn_deadline):
                 # One setup request at a time, each seeing the latest adopted
                 # id; the cap turns a vendor that never converges into a turn
-                # failure instead of a loop.
+                # failure instead of a loop. A converging vendor reports that
+                # only on the call after its final message, so the range has
+                # one extra, request-free iteration to observe it — otherwise
+                # a chain that completes on the limit-th request would fail.
                 recovered_contention = False
-                for _ in range(SETUP_REQUEST_LIMIT):
+                for index in range(SETUP_REQUEST_LIMIT + 1):
                     message = vendor.next_setup_message(
                         session_id=self.session_id,
                         model=prompt.model,
@@ -1038,6 +1051,13 @@ class CliHarness:
                     )
                     if message is None:
                         break
+                    if index == SETUP_REQUEST_LIMIT:
+                        # Observation only: a message here means the vendor
+                        # still wants a request past the cap.
+                        return TurnOutcome.failed(
+                            f"The {self.vendor.id.value} conversation setup did not converge.",
+                            message_cost_usd=state.cost_usd,
+                        )
                     response = await server.request(message)
                     response_failure = _response_error(response)
                     if (
@@ -1065,11 +1085,6 @@ class CliHarness:
                             agent_session_id=adopted,
                             action="created",
                         )
-                else:
-                    return TurnOutcome.failed(
-                        f"The {self.vendor.id.value} conversation setup did not converge.",
-                        message_cost_usd=state.cost_usd,
-                    )
                 start = vendor.turn_start_message(
                     session_id=self.session_id,
                     prompt_text=prompt.text,

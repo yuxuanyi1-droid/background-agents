@@ -388,6 +388,73 @@ async def test_resident_turn_fails_on_an_error_response(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_resident_setup_converging_on_the_last_request_still_runs(
+    tmp_path: Path,
+) -> None:
+    # A converging vendor reports completion only on the call after its final
+    # message; when that final message is also the limit-th request, setup
+    # must still succeed.
+    class _ExactSetupVendor(_ResidentScriptVendor):
+        def __init__(self, script: str) -> None:
+            super().__init__(script)
+            self.remaining = cli_harness.SETUP_REQUEST_LIMIT
+            self.calls = 0
+
+        def next_setup_message(self, **_: Any) -> dict[str, Any] | None:
+            self.calls += 1
+            if self.remaining <= 0:
+                return None
+            self.remaining -= 1
+            return {"type": "ensure"}
+
+    script = (
+        _SERVER_HEAD + "    elif kind == 'prompt':\n"
+        "        send({'id': message['id'], 'result': {'accepted': True}})\n"
+        "        send({'type': 'delta', 'text': 'ok'})\n"
+        "        send({'type': 'done'})\n"
+    )
+    vendor = _ExactSetupVendor(script)
+    harness = _harness(vendor, tmp_path)
+    await harness.create_session()
+    outcome, _ = await _run(harness)
+    assert outcome.success
+    assert vendor.calls == cli_harness.SETUP_REQUEST_LIMIT + 1
+    await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_resident_setup_past_the_request_limit_fails_without_extra_requests(
+    tmp_path: Path,
+) -> None:
+    # The cap bounds requests, not observations: the request-free iteration
+    # after the limit-th request is what proves the vendor never converges.
+    class _NeverConvergingVendor(_ResidentScriptVendor):
+        def __init__(self, script: str) -> None:
+            super().__init__(script)
+            self.calls = 0
+            self.adopted = 0
+
+        def next_setup_message(self, **_: Any) -> dict[str, Any] | None:
+            self.calls += 1
+            return {"type": "ensure"}
+
+        def adopt_response_id(self, response: dict[str, Any]) -> str | None:
+            self.adopted += 1
+            return super().adopt_response_id(response)
+
+    script = _SERVER_HEAD
+    vendor = _NeverConvergingVendor(script)
+    harness = _harness(vendor, tmp_path)
+    await harness.create_session()
+    outcome, _ = await _run(harness)
+    assert not outcome.success
+    assert "did not converge" in (outcome.error or "")
+    assert vendor.adopted == cli_harness.SETUP_REQUEST_LIMIT
+    assert vendor.calls == cli_harness.SETUP_REQUEST_LIMIT + 1
+    await harness.close()
+
+
+@pytest.mark.asyncio
 async def test_resident_interrupt_settles_the_turn(tmp_path: Path) -> None:
     script = (
         _SERVER_HEAD + "    elif kind == 'prompt':\n"
@@ -941,6 +1008,32 @@ async def test_resident_kill_stops_the_whole_server_process_group(tmp_path: Path
     deadline = asyncio.get_running_loop().time() + 5
     while not cli_harness._process_reaped(child_pid):
         assert asyncio.get_running_loop().time() < deadline, "server child survived the kill"
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_terminate_kills_group_members_after_the_child_was_reaped(
+    tmp_path: Path,
+) -> None:
+    # A launcher can exit before the server it spawned, and the reaped child
+    # makes os.getpgid unusable — but the survivors still hold the
+    # conversation locks, so the group must be signalled anyway.
+    child_pid_file = tmp_path / "child.pid"
+    launcher = (
+        "import subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'])\n"
+        f"open({str(child_pid_file)!r}, 'w').write(str(child.pid))\n"
+    )
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", launcher, start_new_session=True
+    )
+    assert await process.wait() == 0  # the launcher exits; its child outlives it
+    child_pid = int(child_pid_file.read_text())
+    assert not cli_harness._process_reaped(child_pid)
+    await cli_harness._terminate_process(process)
+    deadline = asyncio.get_running_loop().time() + 5
+    while not cli_harness._process_reaped(child_pid):
+        assert asyncio.get_running_loop().time() < deadline, "group member survived the kill"
         await asyncio.sleep(0.05)
 
 
