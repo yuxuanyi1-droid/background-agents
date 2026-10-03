@@ -134,7 +134,6 @@ class TestCodexAppServer:
                 },
                 state,
             )
-        assert state.completed
         assert state.tokens == {"input": 3}
         # The step already fired at the first output; the sentinel may carry
         # no further events — the harness emits whatever rides it either way.
@@ -480,7 +479,6 @@ class TestPiRpc:
         assert events[-1]["type"] == "token" and events[-1]["content"] == "Hi"
         with pytest.raises(CliTurnSettled):
             vendor.parse_server_message({"type": "agent_settled"}, state)
-        assert state.completed
 
     def test_interrupt_and_extension_ui_reply(self) -> None:
         vendor = PiVendor()
@@ -651,7 +649,6 @@ class TestZcodeAppServer:
                 ),
                 state,
             )
-        assert state.completed
         assert state.tokens == {"input": 5}
         assert settled.value.events[-1]["type"] == "token"
         assert settled.value.events[-1]["content"] == "Hello"
@@ -1048,7 +1045,6 @@ class TestCodex:
         events = vendor.parse_record(
             {"type": "turn.completed", "usage": {"input_tokens": 3, "output_tokens": 5}}, state
         )
-        assert state.completed
         assert state.tokens == {"input": 3, "output": 5}
 
     def test_compaction_item_emits_context_compacted(self) -> None:

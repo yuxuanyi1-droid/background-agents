@@ -94,7 +94,6 @@ class CliTurnState:
     cost_committed_usd: float = 0.0
     tokens: dict[str, Any] | None = None
     step_started: bool = False
-    completed: bool = False
     # The vendor reported the turn as aborted (a stop the client asked for, or
     # the vendor's own interruption); the turn settles as cancelled, not failed.
     cancelled: bool = False
@@ -274,12 +273,14 @@ class ResidentCliVendor(Protocol):
         permission or input prompt nobody answers would hang the turn."""
         ...
 
-    settle_after_final_message: float
+    settle_after_final_message: float | None
     """Grace seconds after the vendor marks ``state.final_message_seen_at``
     before the turn settles without its own terminal notification — for
     vendors whose final assistant message is authoritative (Pi) but whose
-    settle event can be late or lost in a post-turn hang. Zero (default)
-    disables it: only the vendor's terminal notification settles."""
+    settle event can be late or lost in a post-turn hang. Zero settles the
+    moment the final message lands; ``None`` — the default when a vendor
+    omits the attribute — disables the grace, so only the vendor's terminal
+    notification (or the inactivity bound) settles."""
 
     def setup_lock_contention(self, failure: str) -> bool:
         """Whether a failed setup request means another live process holds
@@ -840,7 +841,6 @@ class CliHarness:
         self.has_repository = has_repository
         self.session_id: str | None = None
         self._process: asyncio.subprocess.Process | None = None
-        self._abort_requested = False
         self._custom_providers: tuple[CustomProvider, ...] = ()
         self._server: _ResidentServer | None = None
         self._active_state: CliTurnState | None = None
@@ -903,7 +903,6 @@ class CliHarness:
 
     async def run_prompt(self, prompt: HarnessPrompt, emit: EventSink) -> TurnOutcome:
         state = CliTurnState(message_id=prompt.message_id, step_id=str(uuid.uuid4()))
-        self._abort_requested = False
         budget = (
             prompt.max_duration_seconds
             if prompt.max_duration_seconds is not None
@@ -1036,7 +1035,6 @@ class CliHarness:
                 raise
             self._server = server
         server.drop_queued_notifications()
-        self._abort_requested = False
         vendor: ResidentCliVendor = self.vendor  # type: ignore[assignment]
         failure: Exception | None = None
         loop = asyncio.get_running_loop()
@@ -1163,14 +1161,16 @@ class CliHarness:
         while True:
             wait = self.limits.inactivity_timeout_seconds
             if state.final_message_seen_at is not None:
-                grace = getattr(vendor, "settle_after_final_message", 0.0) or 0.0
-                remaining = grace - (time.monotonic() - state.final_message_seen_at)
-                if remaining <= 0:
-                    # The vendor's authoritative final answer landed; its own
-                    # settle event is late or never coming (a post-turn hang),
-                    # and the answer is not worth the inactivity budget.
-                    return
-                wait = min(wait, remaining)
+                grace = getattr(vendor, "settle_after_final_message", None)
+                if grace is not None:
+                    remaining = grace - (time.monotonic() - state.final_message_seen_at)
+                    if remaining <= 0:
+                        # The vendor's authoritative final answer landed; its
+                        # own settle event is late or never coming (a post-turn
+                        # hang), and the answer is not worth the inactivity
+                        # budget.
+                        return
+                    wait = min(wait, remaining)
             message = await server.next_notification(wait)
             if message is None:
                 if state.final_message_seen_at is not None:
@@ -1288,7 +1288,6 @@ class CliHarness:
             await emit(event)
 
     async def abort(self) -> bool:
-        self._abort_requested = True
         if self._process is None:
             return False
         await _terminate_process(self._process)
@@ -1299,19 +1298,24 @@ class CliHarness:
         if server is not None and server.alive:
             vendor: ResidentCliVendor = self.vendor  # type: ignore[assignment]
             try:
-                for message in vendor.interrupt_messages(
+                messages = vendor.interrupt_messages(
                     session_id=self.session_id, state=self._active_state
-                ):
+                )
+                for message in messages:
                     # Interrupts are fire-and-forget: the turn loop settles on
                     # the server's terminal notification, or its death below.
                     await server.request(message, timeout=max(timeout_seconds, 5.0))
-                return True
+                if messages:
+                    return True
             except Exception:
-                # An interrupt that cannot be delivered falls back to killing
-                # the server; the next turn restarts and resumes the thread.
-                await server.kill()
-                self._server = None
-                return True
+                pass
+            # Nothing to deliver (no interrupt channel for this vendor state)
+            # or nothing deliverable: killing the server is the fallback, since
+            # a stop that cannot be sent must not report success while the turn
+            # keeps running. The next turn restarts and resumes the thread.
+            await server.kill()
+            self._server = None
+            return True
         process = self._process
         if process is None:
             return True

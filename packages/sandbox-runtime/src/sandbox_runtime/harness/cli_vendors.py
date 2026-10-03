@@ -449,7 +449,6 @@ class CodexVendor:
             usage = record.get("usage")
             if isinstance(usage, dict):
                 state.tokens = _usage_tokens(usage)
-            state.completed = True
             return step_start_events(state)
         if kind == "turn.failed":
             return error_event(state, _error_text(record.get("error")) or "Codex turn failed")
@@ -736,7 +735,6 @@ class PiVendor:
         if kind == "auto_retry_end" and record.get("success") is False:
             return error_event(state, str(record.get("finalError") or "Pi retries exhausted"))
         if kind == "agent_settled":
-            state.completed = True
             return step_start_events(state)
         return []
 
@@ -1030,7 +1028,6 @@ class ZcodeVendor:
             usage = payload.get("usage")
             if isinstance(usage, dict):
                 state.tokens = _usage_tokens(usage)
-            state.completed = True
             raise CliTurnSettled(events)
         if kind == "turn.failed":
             detail = _error_text(payload.get("error")) or "ZCode turn failed"

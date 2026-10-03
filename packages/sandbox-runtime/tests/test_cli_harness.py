@@ -54,7 +54,6 @@ class _ScriptedVendor:
         if record.get("type") == "text":
             return append_text_events(state, str(record["delta"]))
         if record.get("type") == "end":
-            state.completed = True
             return step_start_events(state)
         return []
 
@@ -276,7 +275,6 @@ class _ResidentScriptVendor(_ScriptedVendor):
         if message.get("type") == "delta":
             return append_text_events(state, str(message.get("text") or ""))
         if message.get("type") == "done":
-            state.completed = True
             raise CliTurnSettled(step_start_events(state))
         return []
 
@@ -482,6 +480,50 @@ async def test_resident_interrupt_settles_the_turn(tmp_path: Path) -> None:
     outcome = await asyncio.wait_for(task, 5)
     assert outcome.success
     await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_stop_execution_without_an_interrupt_channel_kills_the_server(
+    tmp_path: Path,
+) -> None:
+    # A vendor with no interrupt request for this state (zcode before a
+    # session id exists) cannot be asked to stop over the protocol; claiming
+    # the stop succeeded would leave the turn running, so the fallback is
+    # killing the server.
+    script = (
+        _SERVER_HEAD + "    elif kind == 'prompt':\n"
+        "        send({'id': message['id'], 'result': {'accepted': True}})\n"
+        "        send({'type': 'delta', 'text': 'Working'})\n"
+        "        import time\n"
+        "        time.sleep(600)\n"
+    )
+
+    class _NoInterruptVendor(_ResidentScriptVendor):
+        def interrupt_messages(
+            self, *, session_id: str | None, state: CliTurnState | None
+        ) -> list[dict[str, Any]]:
+            return []
+
+    harness = _harness(_NoInterruptVendor(script), tmp_path)
+    await harness.create_session()
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    task = asyncio.create_task(harness.run_prompt(HarnessPrompt(message_id="m1", text="hi"), emit))
+    async with asyncio.timeout(5):
+        while not any(event["type"] == "token" for event in events):
+            await asyncio.sleep(0.05)
+    try:
+        assert await harness.stop_execution(5.0) is True
+        assert harness._server is None
+        outcome = await asyncio.wait_for(task, 5)
+        assert not outcome.success
+    finally:
+        await harness.close()
+        if not task.done():
+            task.cancel()
 
 
 @pytest.mark.asyncio
@@ -751,6 +793,35 @@ async def test_resident_settles_after_the_final_message_grace(tmp_path: Path) ->
     outcome, events = await _run(harness)
     assert outcome.success
     assert events[-1]["type"] == "step_finish"
+    await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_final_message_without_a_settle_grace_waits_for_the_terminal(tmp_path: Path) -> None:
+    # The grace is opt-in (pi's 60s); a vendor that leaves it unset settles on
+    # its own terminal notification, so trailing notifications after the final
+    # message must still be consumed — not dropped by an implicit zero grace.
+    script = (
+        _SERVER_HEAD + "    elif kind == 'prompt':\n"
+        "        send({'id': message['id'], 'result': {'accepted': True}})\n"
+        "        send({'type': 'final_message'})\n"
+        "        send({'type': 'delta', 'text': ' tail'})\n"
+        "        send({'type': 'done'})\n"
+    )
+
+    class _NoGraceVendor(_ResidentScriptVendor):
+        def parse_server_message(self, message: dict[str, Any], state: CliTurnState) -> list[Any]:
+            if message.get("type") == "final_message":
+                state.final_message_seen_at = __import__("time").monotonic()
+                return []
+            return super().parse_server_message(message, state)
+
+    harness = _harness(_NoGraceVendor(script), tmp_path)
+    await harness.create_session()
+    outcome, events = await _run(harness)
+    assert outcome.success
+    tokens = [event["content"] for event in events if event["type"] == "token"]
+    assert tokens and tokens[-1].endswith("tail")
     await harness.close()
 
 
