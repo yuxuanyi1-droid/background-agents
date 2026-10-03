@@ -1009,6 +1009,12 @@ class ZcodeVendor:
         if kind == "model.streaming":
             return self._streaming_events(payload, state)
         if kind == "turn.completed":
+            # A user stop (session/stop) is reported through this same event
+            # as resultType "cancelled" with an empty response — TurnError is
+            # reserved for real errors — so the turn settles as cancelled
+            # instead of reading as a success or an empty-output failure.
+            if payload.get("resultType") == "cancelled":
+                state.cancelled = True
             response = str(payload.get("response") or "")
             # The response is the last step's full text: the live stream
             # usually delivered it already (keep), it may extend a streamed

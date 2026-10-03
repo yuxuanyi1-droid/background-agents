@@ -848,6 +848,32 @@ class TestZcodeAppServer:
             )
         assert settled.value.events[0]["type"] == "error"
 
+    def test_cancelled_turn_settles_as_cancelled_not_empty_output(self) -> None:
+        # A user stop rides turn.completed with resultType "cancelled" and an
+        # empty response (TurnError is reserved for real errors); it must not
+        # fail as a turn that "completed without emitting assistant output",
+        # and the stopped turn's usage still counts.
+        vendor = ZcodeVendor()
+        state = _state()
+        with pytest.raises(CliTurnSettled) as settled:
+            vendor.parse_server_message(
+                self._session_event(
+                    "turn.completed",
+                    {
+                        "response": "",
+                        "resultType": "cancelled",
+                        "usage": {"inputTokens": 7, "outputTokens": 0},
+                    },
+                ),
+                state,
+            )
+        assert state.cancelled
+        assert settled.value.events == []
+        assert state.tokens == {"input": 7, "output": 0}
+        outcome = vendor.exit_outcome(state, 0, "")
+        assert outcome.cancelled and not outcome.success
+        assert outcome.error == "Task was cancelled"
+
     def test_interrupt_stops_the_session(self) -> None:
         vendor = ZcodeVendor()
         assert vendor.interrupt_messages(session_id=None, state=_state()) == []
