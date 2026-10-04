@@ -58,6 +58,7 @@ import { formatSessionCost } from "@/lib/session-cost";
 import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
 import { useSessionSnapshot } from "./session-snapshot-provider";
 import { useSessionRename } from "@/hooks/use-session-rename";
+import { useThinkingDisplay } from "@/hooks/use-thinking-display";
 import { useCurrentUserAuthorization } from "@/hooks/use-current-user-authorization";
 import { resolveSessionCapabilities } from "@/lib/session-capabilities";
 import { SandboxShutdownBanner } from "@/components/sandbox-shutdown-banner";
@@ -103,6 +104,7 @@ export default function SessionPage() {
   } = useSessionSocket(sessionId, initialSnapshot, capabilities);
   const latestTerminalMessageId = useMemo(() => findLatestTerminalMessageId(events), [events]);
   useMarkSessionRead(sessionId, latestTerminalMessageId);
+  const { thinkingDisplay, setThinkingDisplay } = useThinkingDisplay();
   const { profiles, participants: profiledParticipants } = useSessionParticipantProfiles(
     sessionId,
     participants,
@@ -336,6 +338,7 @@ export default function SessionPage() {
                 participantProfiles={profiles}
                 isProcessing={isProcessing}
                 liveThinking={liveThinking}
+                thinkingDisplay={thinkingDisplay}
                 promptQueue={promptQueue}
                 showSkeleton={false}
                 onLoadOlder={loadOlderEvents}
@@ -411,6 +414,7 @@ export default function SessionPage() {
             onModelChange: handleModelChange,
             onReasoningEffortChange: setReasoningEffort,
           }}
+          thinking={{ display: thinkingDisplay, onDisplayChange: setThinkingDisplay }}
         />
       )}
     </div>

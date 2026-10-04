@@ -398,6 +398,44 @@ describe("completed turn activity", () => {
 });
 
 describe("reasoning display", () => {
+  const reasoningEvents: SandboxEvent[] = [
+    { ...event(), content: "Why is it slow?", timestamp: 100 },
+    {
+      type: "thinking",
+      content: "Checking the query plan first\nThen the index usage",
+      messageId: "message-1",
+      sandboxId: "sandbox-1",
+      timestamp: 101,
+    },
+    {
+      type: "tool_call",
+      tool: "Read",
+      args: { filePath: "/workspace/db.ts" },
+      callId: "call-1",
+      messageId: "message-1",
+      sandboxId: "sandbox-1",
+      timestamp: 102,
+    },
+    {
+      type: "token",
+      messageId: "message-1",
+      content: "Added the missing index.",
+      sandboxId: "sandbox-1",
+      timestamp: 103,
+    },
+    {
+      type: "execution_complete",
+      messageId: "message-1",
+      success: true,
+      sandboxId: "sandbox-1",
+      timestamp: 104,
+    },
+  ];
+
+  async function expandTurnActivity() {
+    await userEvent.click(screen.getByRole("button", { name: "Worked for 4s" }));
+  }
+
   it("streams the live reasoning text in the processing indicator", () => {
     render(
       <SessionTimeline
@@ -409,7 +447,38 @@ describe("reasoning display", () => {
     );
 
     expect(screen.getByText("Thinking...")).toBeInTheDocument();
-    expect(screen.getByText("Comparing the two candidate approaches")).toBeInTheDocument();
+    const preview = screen.getByText("Comparing the two candidate approaches");
+    expect(preview).toBeInTheDocument();
+    expect(preview).toHaveClass("max-h-24");
+  });
+
+  it("gives the live reasoning text more room in full display", () => {
+    render(
+      <SessionTimeline
+        {...baseTimelineProps}
+        events={[]}
+        isProcessing
+        liveThinking={"Comparing the two candidate approaches"}
+        thinkingDisplay="full"
+      />
+    );
+
+    expect(screen.getByText("Comparing the two candidate approaches")).toHaveClass("max-h-60");
+  });
+
+  it("keeps the live indicator but hides the preview in hidden display", () => {
+    render(
+      <SessionTimeline
+        {...baseTimelineProps}
+        events={[]}
+        isProcessing
+        liveThinking={"Drafting the plan"}
+        thinkingDisplay="hidden"
+      />
+    );
+
+    expect(screen.getByText("Thinking...")).toBeInTheDocument();
+    expect(screen.queryByText("Drafting the plan")).not.toBeInTheDocument();
   });
 
   it("shows only the status while no reasoning has streamed", () => {
@@ -418,48 +487,41 @@ describe("reasoning display", () => {
     expect(screen.getByText("Thinking...")).toBeInTheDocument();
   });
 
-  it("keeps the finished reasoning trail inside the collapsed turn activity", async () => {
-    const events: SandboxEvent[] = [
-      { ...event(), content: "Why is it slow?", timestamp: 100 },
-      {
-        type: "thinking",
-        content: "Checking the query plan first",
-        messageId: "message-1",
-        sandboxId: "sandbox-1",
-        timestamp: 101,
-      },
-      {
-        type: "tool_call",
-        tool: "Read",
-        args: { filePath: "/workspace/db.ts" },
-        callId: "call-1",
-        messageId: "message-1",
-        sandboxId: "sandbox-1",
-        timestamp: 102,
-      },
-      {
-        type: "token",
-        messageId: "message-1",
-        content: "Added the missing index.",
-        sandboxId: "sandbox-1",
-        timestamp: 103,
-      },
-      {
-        type: "execution_complete",
-        messageId: "message-1",
-        success: true,
-        sandboxId: "sandbox-1",
-        timestamp: 104,
-      },
-    ];
-    render(<SessionTimeline {...baseTimelineProps} events={events} />);
+  it("keeps the finished reasoning trail collapsed behind a one-line teaser by default", async () => {
+    render(<SessionTimeline {...baseTimelineProps} events={reasoningEvents} />);
 
-    expect(screen.queryByText("Checking the query plan first")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Checking the query plan first/)).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: "Worked for 4s" }));
+    await expandTurnActivity();
 
     expect(screen.getByText("Thinking")).toBeInTheDocument();
-    expect(screen.getByText("Checking the query plan first")).toBeInTheDocument();
+    const teaser = screen.getByText("Checking the query plan first");
+    expect(teaser.closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByText("Added the missing index.")).toBeInTheDocument();
+  });
+
+  it("expands every finished segment in full display", async () => {
+    render(
+      <SessionTimeline {...baseTimelineProps} events={reasoningEvents} thinkingDisplay="full" />
+    );
+
+    await expandTurnActivity();
+
+    const body = screen.getByText(/Then the index usage/);
+    expect(body).toHaveClass("whitespace-pre-wrap");
+    expect(body.closest("details")).toHaveAttribute("open");
+    expect(screen.queryByText("Checking the query plan first")).not.toBeInTheDocument();
+  });
+
+  it("drops finished segments from the timeline in hidden display", async () => {
+    render(
+      <SessionTimeline {...baseTimelineProps} events={reasoningEvents} thinkingDisplay="hidden" />
+    );
+
+    await expandTurnActivity();
+
+    expect(screen.queryByText("Thinking")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Checking the query plan first/)).not.toBeInTheDocument();
     expect(screen.getByText("Added the missing index.")).toBeInTheDocument();
   });
 });
