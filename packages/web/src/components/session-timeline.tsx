@@ -35,11 +35,7 @@ import {
   type TimelineVirtualRow,
 } from "@/lib/timeline-virtual-rows";
 import { toUiArtifactMetadata } from "@/lib/session-socket/artifact-metadata";
-import {
-  DEFAULT_THINKING_DISPLAY,
-  thinkingTeaser,
-  type ThinkingDisplay,
-} from "@/lib/thinking-display";
+import { thinkingTeaser } from "@/lib/thinking-display";
 import type { SandboxEvent } from "@/types/session";
 import type { SessionParticipantProfile } from "@open-inspect/shared/types/sessions";
 import { CheckIcon, ChevronRightIcon, CopyIcon, ErrorIcon } from "@/components/ui/icons";
@@ -65,7 +61,6 @@ export function SessionTimeline({
   participantProfiles,
   isProcessing,
   liveThinking = null,
-  thinkingDisplay = DEFAULT_THINKING_DISPLAY,
   promptQueue = EMPTY_PROMPT_QUEUE,
   showSkeleton,
   onLoadOlder,
@@ -78,8 +73,6 @@ export function SessionTimeline({
   isProcessing: boolean;
   /** The reasoning text streaming in the in-flight turn, shown by the indicator. */
   liveThinking?: string | null;
-  /** How the reasoning trail renders; hidden drops it from the timeline. */
-  thinkingDisplay?: ThinkingDisplay;
   promptQueue?: PromptQueueItem[];
   showSkeleton: boolean;
   onLoadOlder: () => void;
@@ -93,12 +86,8 @@ export function SessionTimeline({
     [promptQueue]
   );
   const timelineItems = useMemo(
-    () =>
-      buildSessionTimelineItems(
-        thinkingDisplay === "hidden" ? events.filter((event) => event.type !== "thinking") : events,
-        pendingMessageIds
-      ),
-    [events, pendingMessageIds, thinkingDisplay]
+    () => buildSessionTimelineItems(events, pendingMessageIds),
+    [events, pendingMessageIds]
   );
   const [expandedToolGroups, setExpandedToolGroups] = useState<Set<string>>(new Set());
   const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set());
@@ -236,7 +225,6 @@ export function SessionTimeline({
         sessionId={sessionId}
         currentParticipantId={currentParticipantId}
         participantProfiles={participantProfiles}
-        thinkingDisplay={thinkingDisplay}
         expandedAutofixSections={
           item.event.type === "user_message"
             ? (expandedAutofixSections.get(item.event.messageId) ?? EMPTY_EXPANDED_SECTIONS)
@@ -281,7 +269,7 @@ export function SessionTimeline({
   const renderVirtualRow = (row: TimelineVirtualRow): ReactNode => {
     switch (row.type) {
       case "thinking":
-        return <ThinkingIndicator content={liveThinking} thinkingDisplay={thinkingDisplay} />;
+        return <ThinkingIndicator content={liveThinking} />;
       case "item":
         return renderTimelineItem(row.item);
     }
@@ -323,26 +311,20 @@ export function SessionTimeline({
   );
 }
 
-function ThinkingIndicator({
-  content,
-  thinkingDisplay,
-}: {
-  content: string | null;
-  thinkingDisplay: ThinkingDisplay;
-}) {
+function ThinkingIndicator({ content }: { content: string | null }) {
   return (
     <div className="bg-card p-4 space-y-2">
       <div className="flex items-center gap-2">
         <span className="inline-block w-2 h-2 bg-accent rounded-full animate-pulse" />
         <span className="text-sm text-muted-foreground">Thinking...</span>
       </div>
-      {content && thinkingDisplay !== "hidden" && (
+      {content && (
         <div
           className={cn(
             // Anchored to the end so the newest reasoning stays visible as
             // the text outgrows the clamp.
             "flex flex-col justify-end overflow-hidden border-l-2 border-border-muted pl-3 text-sm whitespace-pre-wrap text-muted-foreground [overflow-wrap:anywhere]",
-            thinkingDisplay === "full" ? "max-h-60" : "max-h-24"
+            "max-h-24"
           )}
         >
           {content}
@@ -379,7 +361,6 @@ type EventRendererProps = {
   participantProfiles: Record<string, SessionParticipantProfile>;
   copied: boolean;
   onCopyContent: (content: string) => void;
-  thinkingDisplay: ThinkingDisplay;
   expandedAutofixSections: ReadonlySet<string>;
   onToggleAutofixSection: (messageId: string, key: string) => void;
   onOpenMedia: (artifactId: string) => void;
@@ -636,18 +617,17 @@ function AssistantMessageEvent({ event, copied, onCopyContent }: EventRendererPr
 }
 
 /**
- * The model's reasoning trail for one segment. Summary keeps it collapsed
- * behind a one-line teaser, full keeps it expanded, and hidden removes it
- * entirely — it is context for the turn's tools and answer, not an answer
+ * The model's reasoning trail for one segment, collapsed behind a one-line
+ * teaser — it is context for the turn's tools and answer, not an answer
  * itself. Native `<details>` keeps this a plain renderer with no expansion
  * plumbing.
  */
-function ThinkingEvent({ event, thinkingDisplay }: EventRendererProps) {
-  if (event.type !== "thinking" || thinkingDisplay === "hidden") return null;
-  const teaser = thinkingDisplay === "summary" ? thinkingTeaser(event.content) : "";
+function ThinkingEvent({ event }: EventRendererProps) {
+  if (event.type !== "thinking") return null;
+  const teaser = thinkingTeaser(event.content);
 
   return (
-    <details open={thinkingDisplay === "full"} className="group border border-border-muted bg-card">
+    <details className="group border border-border-muted bg-card">
       <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs text-muted-foreground transition-colors hover:text-foreground sm:px-4">
         <ChevronRightIcon className="h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-90" />
         <span className="shrink-0">Thinking</span>
@@ -775,7 +755,6 @@ export const EventItem = memo(function EventItem({
   sessionId,
   currentParticipantId,
   participantProfiles,
-  thinkingDisplay = DEFAULT_THINKING_DISPLAY,
   expandedAutofixSections = EMPTY_EXPANDED_SECTIONS,
   onToggleAutofixSection = NOOP_TOGGLE_SECTION,
   onOpenMedia,
@@ -784,7 +763,6 @@ export const EventItem = memo(function EventItem({
   sessionId: string;
   currentParticipantId: string | null;
   participantProfiles: Record<string, SessionParticipantProfile>;
-  thinkingDisplay?: ThinkingDisplay;
   expandedAutofixSections?: ReadonlySet<string>;
   onToggleAutofixSection?: (messageId: string, key: string) => void;
   onOpenMedia: (artifactId: string) => void;
@@ -824,7 +802,6 @@ export const EventItem = memo(function EventItem({
     participantProfiles,
     copied,
     onCopyContent: handleCopyContent,
-    thinkingDisplay,
     expandedAutofixSections,
     onToggleAutofixSection,
     onOpenMedia,

@@ -449,36 +449,7 @@ describe("reasoning display", () => {
     expect(screen.getByText("Thinking...")).toBeInTheDocument();
     const preview = screen.getByText("Comparing the two candidate approaches");
     expect(preview).toBeInTheDocument();
-    expect(preview).toHaveClass("max-h-60");
-  });
-
-  it("clamps the live reasoning text in summary display", () => {
-    render(
-      <SessionTimeline
-        {...baseTimelineProps}
-        events={[]}
-        isProcessing
-        liveThinking={"Comparing the two candidate approaches"}
-        thinkingDisplay="summary"
-      />
-    );
-
-    expect(screen.getByText("Comparing the two candidate approaches")).toHaveClass("max-h-24");
-  });
-
-  it("keeps the live indicator but hides the preview in hidden display", () => {
-    render(
-      <SessionTimeline
-        {...baseTimelineProps}
-        events={[]}
-        isProcessing
-        liveThinking={"Drafting the plan"}
-        thinkingDisplay="hidden"
-      />
-    );
-
-    expect(screen.getByText("Thinking...")).toBeInTheDocument();
-    expect(screen.queryByText("Drafting the plan")).not.toBeInTheDocument();
+    expect(preview).toHaveClass("max-h-24");
   });
 
   it("shows only the status while no reasoning has streamed", () => {
@@ -487,10 +458,8 @@ describe("reasoning display", () => {
     expect(screen.getByText("Thinking...")).toBeInTheDocument();
   });
 
-  it("keeps the finished reasoning trail collapsed behind a one-line teaser in summary display", async () => {
-    render(
-      <SessionTimeline {...baseTimelineProps} events={reasoningEvents} thinkingDisplay="summary" />
-    );
+  it("keeps the finished reasoning trail collapsed behind a one-line teaser", async () => {
+    render(<SessionTimeline {...baseTimelineProps} events={reasoningEvents} />);
 
     expect(screen.queryByText(/Checking the query plan first/)).not.toBeInTheDocument();
 
@@ -498,32 +467,10 @@ describe("reasoning display", () => {
 
     expect(screen.getByText("Thinking")).toBeInTheDocument();
     const teaser = screen.getByText("Checking the query plan first");
-    expect(teaser.closest("details")).not.toHaveAttribute("open");
-    expect(screen.getByText("Added the missing index.")).toBeInTheDocument();
-  });
-
-  it("expands every finished segment in full display", async () => {
-    render(
-      <SessionTimeline {...baseTimelineProps} events={reasoningEvents} thinkingDisplay="full" />
-    );
-
-    await expandTurnActivity();
-
-    const body = screen.getByText(/Then the index usage/);
-    expect(body).toHaveClass("whitespace-pre-wrap");
-    expect(body.closest("details")).toHaveAttribute("open");
-    expect(screen.queryByText("Checking the query plan first")).not.toBeInTheDocument();
-  });
-
-  it("drops finished segments from the timeline in hidden display", async () => {
-    render(
-      <SessionTimeline {...baseTimelineProps} events={reasoningEvents} thinkingDisplay="hidden" />
-    );
-
-    await expandTurnActivity();
-
-    expect(screen.queryByText("Thinking")).not.toBeInTheDocument();
-    expect(screen.queryByText(/Checking the query plan first/)).not.toBeInTheDocument();
+    const details = teaser.closest("details");
+    // Collapsed by default; the full trail stays in the DOM for expanding.
+    expect(details).not.toHaveAttribute("open");
+    expect(screen.getByText(/Then the index usage/)).toHaveClass("whitespace-pre-wrap");
     expect(screen.getByText("Added the missing index.")).toBeInTheDocument();
   });
 });

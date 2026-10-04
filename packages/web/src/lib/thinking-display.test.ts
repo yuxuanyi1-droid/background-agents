@@ -1,27 +1,7 @@
 import { describe, expect, it } from "vitest";
-import {
-  DEFAULT_THINKING_DISPLAY,
-  isThinkingDisplay,
-  THINKING_TEASER_MAX_CHARS,
-  thinkingTeaser,
-} from "./thinking-display";
-
-describe("isThinkingDisplay", () => {
-  it("accepts every display mode and rejects everything else", () => {
-    expect(isThinkingDisplay("summary")).toBe(true);
-    expect(isThinkingDisplay("full")).toBe(true);
-    expect(isThinkingDisplay("hidden")).toBe(true);
-    expect(isThinkingDisplay("expanded")).toBe(false);
-    expect(isThinkingDisplay("")).toBe(false);
-    expect(isThinkingDisplay(null)).toBe(false);
-  });
-});
+import { THINKING_TEASER_MAX_CHARS, thinkingTeaser } from "./thinking-display";
 
 describe("thinkingTeaser", () => {
-  it("defaults to the full display", () => {
-    expect(DEFAULT_THINKING_DISPLAY).toBe("full");
-  });
-
   it("previews the first non-empty line with collapsed whitespace", () => {
     expect(thinkingTeaser("\n\n  Checking   the query\nplan later")).toBe("Checking the query");
   });

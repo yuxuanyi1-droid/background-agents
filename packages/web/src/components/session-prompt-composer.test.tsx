@@ -9,7 +9,6 @@ import * as matchers from "@testing-library/jest-dom/matchers";
 import { SessionPromptComposer } from "./session-prompt-composer";
 import { MAX_WEB_PROMPT_CHARS } from "@open-inspect/shared/types/websocket";
 import type { SessionCapabilities } from "@/lib/session-capabilities";
-import type { ThinkingDisplay } from "@/lib/thinking-display";
 
 expect.extend(matchers);
 
@@ -54,19 +53,6 @@ vi.mock("@/components/model-reasoning-selector", () => ({
     </>
   ),
 }));
-vi.mock("@/components/thinking-display-selector", () => ({
-  ThinkingDisplaySelector: ({
-    value,
-    onChange,
-  }: {
-    value: ThinkingDisplay;
-    onChange: (value: ThinkingDisplay) => void;
-  }) => (
-    <button type="button" onClick={() => onChange(value === "summary" ? "full" : "summary")}>
-      Thinking: {value}
-    </button>
-  ),
-}));
 
 afterEach(() => {
   cleanup();
@@ -97,7 +83,6 @@ function ComposerHarness({
   harness?: "opencode" | "claude";
 }) {
   const [value, setValue] = useState(initialValue);
-  const [thinkingDisplay, setThinkingDisplay] = useState<ThinkingDisplay>("summary");
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   return (
@@ -144,7 +129,6 @@ function ComposerHarness({
         onModelChange: vi.fn(),
         onReasoningEffortChange: vi.fn(),
       }}
-      thinking={{ display: thinkingDisplay, onDisplayChange: setThinkingDisplay }}
     />
   );
 }
@@ -282,16 +266,5 @@ describe("SessionPromptComposer", () => {
     const trigger = screen.getByRole("button", { name: "Agent, model and effort: claude" });
     expect(trigger).toHaveAttribute("data-agent-editable", "false");
     expect(screen.queryByRole("button", { name: /switch agent/i })).not.toBeInTheDocument();
-  });
-
-  it("wires the thinking display control to the composer's display state", () => {
-    render(<ComposerHarness />);
-
-    const selector = screen.getByRole("button", { name: /thinking:/i });
-    expect(selector).toHaveTextContent("Thinking: summary");
-
-    fireEvent.click(selector);
-
-    expect(screen.getByRole("button", { name: /thinking:/i })).toHaveTextContent("Thinking: full");
   });
 });
