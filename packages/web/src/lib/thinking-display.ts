@@ -5,7 +5,11 @@
  */
 export type ThinkingDisplay = "summary" | "full" | "hidden";
 
-export const DEFAULT_THINKING_DISPLAY: ThinkingDisplay = "summary";
+/**
+ * The display used until the user chooses otherwise. Harnesses already emit
+ * the most detailed reasoning they expose, so the default shows all of it.
+ */
+export const DEFAULT_THINKING_DISPLAY: ThinkingDisplay = "full";
 
 /** The collapsed header shows at most this much of the segment's first line. */
 export const THINKING_TEASER_MAX_CHARS = 120;

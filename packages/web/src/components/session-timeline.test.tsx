@@ -449,21 +449,21 @@ describe("reasoning display", () => {
     expect(screen.getByText("Thinking...")).toBeInTheDocument();
     const preview = screen.getByText("Comparing the two candidate approaches");
     expect(preview).toBeInTheDocument();
-    expect(preview).toHaveClass("max-h-24");
+    expect(preview).toHaveClass("max-h-60");
   });
 
-  it("gives the live reasoning text more room in full display", () => {
+  it("clamps the live reasoning text in summary display", () => {
     render(
       <SessionTimeline
         {...baseTimelineProps}
         events={[]}
         isProcessing
         liveThinking={"Comparing the two candidate approaches"}
-        thinkingDisplay="full"
+        thinkingDisplay="summary"
       />
     );
 
-    expect(screen.getByText("Comparing the two candidate approaches")).toHaveClass("max-h-60");
+    expect(screen.getByText("Comparing the two candidate approaches")).toHaveClass("max-h-24");
   });
 
   it("keeps the live indicator but hides the preview in hidden display", () => {
@@ -487,8 +487,10 @@ describe("reasoning display", () => {
     expect(screen.getByText("Thinking...")).toBeInTheDocument();
   });
 
-  it("keeps the finished reasoning trail collapsed behind a one-line teaser by default", async () => {
-    render(<SessionTimeline {...baseTimelineProps} events={reasoningEvents} />);
+  it("keeps the finished reasoning trail collapsed behind a one-line teaser in summary display", async () => {
+    render(
+      <SessionTimeline {...baseTimelineProps} events={reasoningEvents} thinkingDisplay="summary" />
+    );
 
     expect(screen.queryByText(/Checking the query plan first/)).not.toBeInTheDocument();
 

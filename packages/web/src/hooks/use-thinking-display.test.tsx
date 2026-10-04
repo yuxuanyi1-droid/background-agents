@@ -6,10 +6,10 @@ import { useThinkingDisplay } from "./use-thinking-display";
 afterEach(() => localStorage.clear());
 
 describe("useThinkingDisplay", () => {
-  it("starts from the summary display when nothing is stored", () => {
+  it("starts from the full display when nothing is stored", () => {
     const { result } = renderHook(() => useThinkingDisplay());
 
-    expect(result.current.thinkingDisplay).toBe("summary");
+    expect(result.current.thinkingDisplay).toBe("full");
   });
 
   it("restores and persists an explicit display mode", async () => {
@@ -26,6 +26,6 @@ describe("useThinkingDisplay", () => {
     localStorage.setItem("session-timeline.thinking-display", "expanded");
     const { result } = renderHook(() => useThinkingDisplay());
 
-    expect(result.current.thinkingDisplay).toBe("summary");
+    expect(result.current.thinkingDisplay).toBe("full");
   });
 });

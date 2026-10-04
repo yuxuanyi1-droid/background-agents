@@ -35,7 +35,11 @@ import {
   type TimelineVirtualRow,
 } from "@/lib/timeline-virtual-rows";
 import { toUiArtifactMetadata } from "@/lib/session-socket/artifact-metadata";
-import { thinkingTeaser, type ThinkingDisplay } from "@/lib/thinking-display";
+import {
+  DEFAULT_THINKING_DISPLAY,
+  thinkingTeaser,
+  type ThinkingDisplay,
+} from "@/lib/thinking-display";
 import type { SandboxEvent } from "@/types/session";
 import type { SessionParticipantProfile } from "@open-inspect/shared/types/sessions";
 import { CheckIcon, ChevronRightIcon, CopyIcon, ErrorIcon } from "@/components/ui/icons";
@@ -61,7 +65,7 @@ export function SessionTimeline({
   participantProfiles,
   isProcessing,
   liveThinking = null,
-  thinkingDisplay = "summary",
+  thinkingDisplay = DEFAULT_THINKING_DISPLAY,
   promptQueue = EMPTY_PROMPT_QUEUE,
   showSkeleton,
   onLoadOlder,
@@ -771,7 +775,7 @@ export const EventItem = memo(function EventItem({
   sessionId,
   currentParticipantId,
   participantProfiles,
-  thinkingDisplay = "summary",
+  thinkingDisplay = DEFAULT_THINKING_DISPLAY,
   expandedAutofixSections = EMPTY_EXPANDED_SECTIONS,
   onToggleAutofixSection = NOOP_TOGGLE_SECTION,
   onOpenMedia,

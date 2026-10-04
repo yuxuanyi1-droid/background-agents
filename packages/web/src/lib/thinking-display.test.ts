@@ -18,8 +18,8 @@ describe("isThinkingDisplay", () => {
 });
 
 describe("thinkingTeaser", () => {
-  it("defaults to the summary display", () => {
-    expect(DEFAULT_THINKING_DISPLAY).toBe("summary");
+  it("defaults to the full display", () => {
+    expect(DEFAULT_THINKING_DISPLAY).toBe("full");
   });
 
   it("previews the first non-empty line with collapsed whitespace", () => {
