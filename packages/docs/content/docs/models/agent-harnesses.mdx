@@ -4,7 +4,7 @@ description: Compare the agent harnesses, choose one when you create a session, 
 audience: team-owner
 owner: platform
 status: published
-lastReviewed: "2026-09-29"
+lastReviewed: "2026-10-04"
 relatedCode:
   - packages/shared/src/harnesses.ts
   - docs/CLAUDE_AGENT.md
@@ -24,16 +24,16 @@ The agent harness is the coding agent that runs inside the sandbox. Every sessio
 - Sessions started by Slack, GitHub, and Linear run on OpenCode.
 - OpenCode is the default harness.
 
-Every harness emits the same session events (tokens, tool calls, steps, warnings), so the session page, timeline, and diff work the same way on any of them.
+Every harness emits the same session events (tokens, thinking, tool calls, steps, warnings), so the session page, timeline, and diff work the same way on any of them.
 
 ## Comparison
 
-|                                | OpenCode                                            | Claude Agent                                      | Codex                               | Pi                             | DeepSeek Harness                       | ZCode                                                    |
-| ------------------------------ | --------------------------------------------------- | ------------------------------------------------- | ----------------------------------- | ------------------------------ | -------------------------------------- | -------------------------------------------------------- |
-| Models                         | Every model in the catalog                          | Anthropic models only                             | OpenAI models only                  | Every model in the catalog     | DeepSeek models only                   | Z.AI Coding Plan models only                             |
-| Authentication                 | API keys, or a connected account for OpenAI and xAI | `ANTHROPIC_API_KEY` or a connected Claude account | `OPENAI_API_KEY`                    | Provider API keys              | `DEEPSEEK_API_KEY`                     | ZCode credential store (no API-key environment variable) |
-| Resume after a sandbox restore | By session id                                       | By session id                                     | By session id (`codex exec resume`) | By session id (`--session-id`) | By session id (`--session-id`)         | Not wired yet (the CLI supports `--resume`)              |
-| Bundled in the sandbox image   | Yes                                                 | Yes                                               | Yes                                 | Yes                            | Yes, at the pinned official prerelease | Yes, built from the pinned source tarball                |
+|                                | OpenCode                                            | Claude Agent                                      | Codex                                             | Pi                                         | ZCode                                                                                                                   |
+| ------------------------------ | --------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| Models                         | Every model in the catalog                          | Anthropic models only                             | OpenAI models, plus custom providers (Responses)  | Every catalog model, plus custom providers | Z.AI Coding Plan models, plus custom providers                                                                          |
+| Authentication                 | API keys, or a connected account for OpenAI and xAI | `ANTHROPIC_API_KEY` or a connected Claude account | `OPENAI_API_KEY` or a custom provider's key       | Provider API keys                          | ZCode credential store for Z.AI models (no API-key environment variable); custom providers ride ZCode's provider config |
+| Resume after a sandbox restore | By session id                                       | By session id                                     | By session id (the app-server resumes the thread) | By session id (`--session-id`)             | By session id (`session/resume`; the one-shot CLI takes `--resume`)                                                     |
+| Bundled in the sandbox image   | Yes                                                 | Yes                                               | Yes                                               | Yes                                        | Yes, built from the pinned source tarball                                                                               |
 
 <Callout type="info" title="Installation default Anthropic account">
   A default Claude account set under Settings › Accounts (provider accounts) takes effect only on
@@ -53,22 +53,22 @@ Switching harness drops any provider authentication pin the new harness cannot h
 
 Once the session exists, the **Agent** row disappears. Per-message model overrides on the session page are limited to models the harness can run; an override outside that set is rejected with an error such as `Model "openai/gpt-5.5" cannot run on the Claude Agent harness.` rather than replaced.
 
-## The CLI harnesses: Codex, Pi, DeepSeek Harness, ZCode
+## The CLI harnesses: Codex, Pi, and ZCode
 
-These four run their vendor's coding-agent CLI inside the sandbox as a per-turn subprocess, in the vendor's non-interactive mode:
+These three run their vendor's coding-agent CLI inside the sandbox as a resident protocol server — one process per sandbox, driven per prompt over its stdio protocol:
 
-- **Codex** (`codex exec --json`) runs OpenAI models. The conversation id is the CLI's `thread_id`; follow-up turns resume it with `codex exec resume`.
-- **Pi** (`pi --mode json`) runs any catalog provider. The session id is chosen up front (`--session-id` creates the conversation when absent), so continuity survives sandbox restores.
-- **DeepSeek Harness** (`dsh --profile headless --json`) runs DeepSeek models, resumed by `--session-id`. The CLI is a developer preview with breaking changes expected, so the image pins one exact official prerelease; expect it to move.
-- **ZCode** (`zcode --prompt`) runs Z.AI models, built into the image from the SHA-pinned source tarball (ZCode publishes no CLI package). Its headless output is plain text, conversation resume is not wired yet, and — unlike the others — it has **no API-key environment variable**: credentials come from ZCode's own login/credential store, so an API-key session needs that store staged before its first turn.
+- **Codex** (`codex app-server`) runs OpenAI models, or custom providers on the OpenAI Responses wire API. The conversation id is the thread id the server creates; follow-up turns and sandbox restores resume it with `thread/resume`.
+- **Pi** (`pi --mode rpc`) runs any catalog provider, or a custom provider. The session id is chosen up front (`--session-id` creates the conversation when absent), so continuity survives sandbox restores.
+- **ZCode** (`zcode app-server --stdio`) runs Z.AI models, or custom providers. Built into the image from the SHA-pinned source tarball (ZCode publishes no CLI package); the server resumes sessions with `session/resume` across restores, and its headless `--prompt` mode (plain text) can take a persisted id with `--resume`.
 
-All four are **API-key only**: they read the provider's API key from the session environment (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, and the other provider keys), and connected provider accounts are never offered for them. ZCode is the exception above: until its credential store can be staged, its sessions fail with a clear error rather than running unauthenticated.
+All three are **API-key only**: they read the provider's API key from the session environment (`OPENAI_API_KEY` and the other provider keys), and connected provider accounts are never offered for them. ZCode is the exception: it has **no API-key environment variable** for its Z.AI models — those credentials come from ZCode's own credential store — while custom providers' keys are written into ZCode's provider config, the one place its CLI reads them from.
 
-<Callout type="info" title="Per-turn subprocess">
+<Callout type="info" title="Resident vendor servers">
   Unlike OpenCode (a resident `opencode serve`) and Claude Agent (an SDK-owned child), the CLI
-  harnesses start a fresh agent process per prompt. Each vendor keeps its own conversation store
-  under the sandbox home directory, which the snapshot carries, so restore-resume works by session
-  id wherever the vendor supports it.
+  harnesses drive the vendor's own protocol server over stdin/stdout, one process per sandbox. Each
+  vendor keeps its conversation store under the sandbox home directory, which the snapshot carries,
+  so restore-resume works by session id on all three. An internal one-shot mode (a fresh CLI process
+  per prompt) stays behind an environment switch and is not the normal path.
 </Callout>
 
 ## Claude Agent sessions

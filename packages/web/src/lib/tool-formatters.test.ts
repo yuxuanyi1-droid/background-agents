@@ -173,6 +173,48 @@ describe("formatToolCall Claude Agent tool names", () => {
   });
 });
 
+describe("formatToolCall codex file changes", () => {
+  it("summarizes a single change by operation and file", () => {
+    expect(
+      formatToolCall(
+        toolCall("edit", {
+          changes: [
+            { path: "/repo/src/cli_vendors.py", kind: { type: "update" }, diff: "@@ -1 +1 @@" },
+          ],
+        })
+      )
+    ).toMatchObject({ toolName: "Edit", summary: "Update cli_vendors.py", icon: "pencil" });
+  });
+
+  it("accepts a plain-string change kind", () => {
+    expect(
+      formatToolCall(
+        toolCall("edit", { changes: [{ path: "docs/new.md", kind: "add", diff: "+# Docs" }] })
+      )
+    ).toMatchObject({ summary: "Add new.md" });
+  });
+
+  it("summarizes several changes as a count", () => {
+    const changes = [
+      { path: "a.ts", kind: "update" },
+      { path: "b.ts", kind: { type: "delete" } },
+      { path: "c.ts", kind: "add" },
+    ];
+
+    expect(formatToolCall(toolCall("edit", { changes })).summary).toBe("3 files");
+  });
+
+  it("falls back to the file path when the change set is empty or kindless", () => {
+    expect(
+      formatToolCall(toolCall("edit", { changes: [], filePath: "/repo/src/app.ts" })).summary
+    ).toBe("app.ts");
+    expect(
+      formatToolCall(toolCall("edit", { changes: [{ path: "/repo/x.ts", kind: "rename" }] }))
+        .summary
+    ).toBe("Patch x.ts");
+  });
+});
+
 describe("formatToolGroup", () => {
   it("groups capitalized Claude Agent tool names with their OpenCode equivalents", () => {
     expect(

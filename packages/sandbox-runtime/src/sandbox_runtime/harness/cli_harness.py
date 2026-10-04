@@ -103,6 +103,9 @@ class CliTurnState:
     cancelled: bool = False
     tool_names: dict[str, str] = field(default_factory=dict)
     tool_args: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Streaming tool output (codex command-delivery deltas) keyed by call id;
+    # the completed item reuses it when its own payload carries no full text.
+    tool_outputs: dict[str, str] = field(default_factory=dict)
     agent_texts: dict[str, str] = field(default_factory=dict)
     # Reasoning summary parts keyed by their vendor identity (codex item id and
     # summary index); joined in stream order into the cumulative thinking text.

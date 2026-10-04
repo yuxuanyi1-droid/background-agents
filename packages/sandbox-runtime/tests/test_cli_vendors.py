@@ -422,6 +422,306 @@ class TestCodexAppServer:
             "total": 120,
         }
 
+    def test_agent_message_deltas_stream_the_live_answer(self) -> None:
+        # The app-server streams the answer per delta while the exec stream
+        # only prints the finished item; cumulative emission reuses one token
+        # card, and the completed item's snapshot reconciles it.
+        vendor = CodexVendor()
+        state = _state()
+        events = vendor.parse_server_message(
+            {
+                "method": "item/agentMessage/delta",
+                "params": {"threadId": "t-1", "turnId": "turn-7", "itemId": "i2", "delta": "Hel"},
+            },
+            state,
+        )
+        assert events == [
+            {"type": "step_start", "messageId": "m1", "stepId": state.step_id},
+            {"type": "token", "content": "Hel", "messageId": "m1"},
+        ]
+        events = vendor.parse_server_message(
+            {
+                "method": "item/agentMessage/delta",
+                "params": {"threadId": "t-1", "turnId": "turn-7", "itemId": "i2", "delta": "lo"},
+            },
+            state,
+        )
+        assert events == [{"type": "token", "content": "Hello", "messageId": "m1"}]
+        events = vendor.parse_server_message(
+            {
+                "method": "item/completed",
+                "params": {"item": {"id": "i2", "type": "agentMessage", "text": "Hello"}},
+            },
+            state,
+        )
+        assert events == []
+        assert state.text == "Hello"
+
+    def test_command_output_deltas_stream_into_the_running_card(self) -> None:
+        # App-server command output rides item/commandExecution/outputDelta
+        # (the exec stream only reports the final aggregatedOutput); the card
+        # is re-emitted cumulatively with the cached name and args, and the
+        # completed item reuses the streamed text when it carries none.
+        vendor = CodexVendor()
+        state = _state()
+        vendor.parse_server_message(
+            {
+                "method": "item/started",
+                "params": {
+                    "item": {
+                        "id": "c1",
+                        "type": "commandExecution",
+                        "command": "ls",
+                        "status": "inProgress",
+                    }
+                },
+            },
+            state,
+        )
+        events = vendor.parse_server_message(
+            {
+                "method": "item/commandExecution/outputDelta",
+                "params": {
+                    "threadId": "t-1",
+                    "turnId": "turn-7",
+                    "itemId": "c1",
+                    "delta": "a.txt\n",
+                },
+            },
+            state,
+        )
+        tool = next(event for event in events if event["type"] == "tool_call")
+        assert tool == {
+            "type": "tool_call",
+            "tool": "bash",
+            "args": {"command": "ls"},
+            "callId": "c1",
+            "status": "running",
+            "output": "a.txt\n",
+            "messageId": "m1",
+        }
+        events = vendor.parse_server_message(
+            {
+                "method": "item/commandExecution/outputDelta",
+                "params": {
+                    "threadId": "t-1",
+                    "turnId": "turn-7",
+                    "itemId": "c1",
+                    "delta": "b.txt\n",
+                },
+            },
+            state,
+        )
+        tool = next(event for event in events if event["type"] == "tool_call")
+        assert tool["output"] == "a.txt\nb.txt\n"
+
+        events = vendor.parse_server_message(
+            {
+                "method": "item/completed",
+                "params": {
+                    "item": {
+                        "id": "c1",
+                        "type": "commandExecution",
+                        "command": "ls",
+                        "status": "completed",
+                    }
+                },
+            },
+            state,
+        )
+        tool = next(event for event in events if event["type"] == "tool_call")
+        assert tool["status"] == "completed"
+        assert tool["output"] == "a.txt\nb.txt\n"
+
+    def test_patch_updated_streams_the_running_edit_with_its_diff(self) -> None:
+        # item/fileChange/patchUpdated carries the full replacement change
+        # set with no item body; it becomes a running edit whose output shows
+        # the per-file diff, and later sets replace it in place.
+        vendor = CodexVendor()
+        state = _state()
+        changes = [
+            {"path": "/workspace/a.ts", "kind": {"type": "update"}, "diff": "@@\n-old\n+new"},
+            {"path": "/workspace/b.ts", "kind": "add", "diff": "+b"},
+        ]
+        events = vendor.parse_server_message(
+            {
+                "method": "item/fileChange/patchUpdated",
+                "params": {
+                    "threadId": "t-1",
+                    "turnId": "turn-7",
+                    "itemId": "f1",
+                    "changes": changes,
+                },
+            },
+            state,
+        )
+        tool = next(event for event in events if event["type"] == "tool_call")
+        assert tool["tool"] == "edit"
+        assert tool["callId"] == "f1"
+        assert tool["status"] == "running"
+        assert tool["args"] == {"changes": changes}
+        assert tool["output"] == "/workspace/a.ts:\n@@\n-old\n+new\n/workspace/b.ts:\n+b"
+
+        fuller = [*changes, {"path": "/workspace/c.ts", "kind": "add", "diff": "+c"}]
+        events = vendor.parse_server_message(
+            {
+                "method": "item/fileChange/patchUpdated",
+                "params": {
+                    "threadId": "t-1",
+                    "turnId": "turn-7",
+                    "itemId": "f1",
+                    "changes": fuller,
+                },
+            },
+            state,
+        )
+        tool = next(event for event in events if event["type"] == "tool_call")
+        assert tool["args"] == {"changes": fuller}
+        assert tool["output"].endswith("/workspace/c.ts:\n+c")
+
+        events = vendor.parse_server_message(
+            {
+                "method": "item/completed",
+                "params": {
+                    "item": {
+                        "id": "f1",
+                        "type": "fileChange",
+                        "status": "completed",
+                        "changes": fuller,
+                    }
+                },
+            },
+            state,
+        )
+        tool = next(event for event in events if event["type"] == "tool_call")
+        assert tool["status"] == "completed"
+        assert tool["output"].endswith("/workspace/c.ts:\n+c")
+
+    def test_web_search_items_become_tool_calls(self) -> None:
+        # WebSearchItem has no status field; the started/completed item pair
+        # carries the progress instead, and the query (plus an action when
+        # present) is forwarded.
+        vendor = CodexVendor()
+        state = _state()
+        events = vendor.parse_server_message(
+            {
+                "method": "item/started",
+                "params": {"item": {"id": "w1", "type": "webSearch", "query": "vitest config"}},
+            },
+            state,
+        )
+        tool = next(event for event in events if event["type"] == "tool_call")
+        assert tool["tool"] == "WebSearch"
+        assert tool["args"] == {"query": "vitest config"}
+        assert tool["status"] == "running"
+        events = vendor.parse_server_message(
+            {
+                "method": "item/completed",
+                "params": {
+                    "item": {
+                        "id": "w1",
+                        "type": "webSearch",
+                        "query": "vitest config",
+                        "action": {"type": "search", "query": "vitest config"},
+                        "results": [{"title": "Vitest"}],
+                    }
+                },
+            },
+            state,
+        )
+        tool = next(event for event in events if event["type"] == "tool_call")
+        assert tool["status"] == "completed"
+        assert tool["args"] == {
+            "query": "vitest config",
+            "action": {"type": "search", "query": "vitest config"},
+        }
+
+    def test_turn_plan_notifications_become_todowrite(self) -> None:
+        # The plan rides turn/plan/updated; the task panel reads TodoWrite
+        # tool calls, so each update is forwarded as one with the camelCase
+        # step statuses mapped to the todo vocabulary.
+        vendor = CodexVendor()
+        state = _state()
+        events = vendor.parse_server_message(
+            {
+                "method": "turn/plan/updated",
+                "params": {
+                    "threadId": "t-1",
+                    "turnId": "turn-7",
+                    "explanation": "working",
+                    "plan": [
+                        {"step": "Inspect", "status": "completed"},
+                        {"step": "Patch", "status": "inProgress"},
+                        {"step": "Verify", "status": "pending"},
+                    ],
+                },
+            },
+            state,
+        )
+        tool = next(event for event in events if event["type"] == "tool_call")
+        assert tool["tool"] == "TodoWrite"
+        assert tool["callId"] == "plan"
+        assert tool["status"] == "running"
+        assert tool["args"] == {
+            "todos": [
+                {"content": "Inspect", "status": "completed"},
+                {"content": "Patch", "status": "in_progress"},
+                {"content": "Verify", "status": "pending"},
+            ]
+        }
+
+        events = vendor.parse_server_message(
+            {
+                "method": "turn/plan/updated",
+                "params": {
+                    "threadId": "t-1",
+                    "turnId": "turn-7",
+                    "plan": [
+                        {"step": "Inspect", "status": "completed"},
+                        {"step": "Patch", "status": "completed"},
+                        {"step": "Verify", "status": "completed"},
+                    ],
+                },
+            },
+            state,
+        )
+        tool = next(event for event in events if event["type"] == "tool_call")
+        assert tool["status"] == "completed"
+
+    def test_turn_plan_edges(self) -> None:
+        vendor = CodexVendor()
+        state = _state()
+        # An empty plan is a deliberate clear: emit it so the panel empties.
+        events = vendor.parse_server_message(
+            {"method": "turn/plan/updated", "params": {"plan": []}}, state
+        )
+        tool = next(event for event in events if event["type"] == "tool_call")
+        assert tool["args"] == {"todos": []}
+        assert tool["status"] == "running"
+        # An unknown status is simply not carried; the step still shows.
+        events = vendor.parse_server_message(
+            {
+                "method": "turn/plan/updated",
+                "params": {"plan": [{"step": "Odd", "status": "weird"}]},
+            },
+            state,
+        )
+        tool = next(event for event in events if event["type"] == "tool_call")
+        assert tool["args"] == {"todos": [{"content": "Odd"}]}
+        # A populated plan with nothing readable must not clobber the panel.
+        events = vendor.parse_server_message(
+            {"method": "turn/plan/updated", "params": {"plan": [{"status": "pending"}, 3]}},
+            state,
+        )
+        assert [event for event in events if event["type"] == "tool_call"] == []
+        # A plan that is not a list at all is noise.
+        assert (
+            vendor.parse_server_message(
+                {"method": "turn/plan/updated", "params": {"plan": "nope"}}, state
+            )
+            == []
+        )
+
 
 class TestPiRpc:
     """Resident rpc mode: spawn argv, setup chain, and event translation."""
@@ -1007,6 +1307,28 @@ class TestZcodeAppServer:
         assert reply["id"] == "server-2"
         assert reply["error"]["code"] == -32601
         assert vendor.server_request_messages({"method": "session/event"}) == []
+
+    def test_session_title_update_announces_the_title(self) -> None:
+        # The server names the session once its first turn produced content;
+        # the title also rides the session record, but only this event
+        # announces it live.
+        vendor = ZcodeVendor()
+        state = _state()
+        assert vendor.parse_server_message(
+            self._session_event(
+                "session.titleUpdated",
+                {"title": "Fix the flaky test", "previousTitle": None, "source": "auto"},
+            ),
+            state,
+        ) == [{"type": "session_title", "title": "Fix the flaky test"}]
+        # An empty or missing title is not a title.
+        assert (
+            vendor.parse_server_message(
+                self._session_event("session.titleUpdated", {"title": ""}), state
+            )
+            == []
+        )
+        assert vendor.parse_server_message(self._session_event("session.titleUpdated"), state) == []
 
 
 def test_registry_lists_only_cli_harnesses() -> None:

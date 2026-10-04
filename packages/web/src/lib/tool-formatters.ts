@@ -146,6 +146,38 @@ function operationLabel(operation: PatchOperation | null): string {
   }
 }
 
+/**
+ * Read one codex file-change entry's operation. Codex tags the kind
+ * externally ("update") or as an object ({type: "update", movePath}), so
+ * both spellings are accepted.
+ */
+function changeOperation(kind: unknown): PatchOperation | null {
+  const value =
+    typeof kind === "string"
+      ? kind
+      : kind && typeof kind === "object"
+        ? (kind as { type?: unknown }).type
+        : undefined;
+  return value === "add" || value === "update" || value === "delete" ? value : null;
+}
+
+/**
+ * Summarize a codex file-change set ({path, kind, diff} entries): the single
+ * change by operation and file, several as a count.
+ */
+function summarizeChanges(changes: unknown[]): string | null {
+  if (changes.length === 0) return null;
+  if (changes.length > 1) return `${changes.length} files`;
+  const change = changes[0];
+  const path =
+    change && typeof change === "object" ? (change as { path?: unknown }).path : undefined;
+  const kind =
+    change && typeof change === "object" ? (change as { kind?: unknown }).kind : undefined;
+  return `${operationLabel(changeOperation(kind))} ${basename(
+    typeof path === "string" ? path : undefined
+  )}`;
+}
+
 export interface FormattedToolCall {
   /** Tool name for display */
   toolName: string;
@@ -200,11 +232,15 @@ export function formatToolCall(event: ToolCallEvent): FormattedToolCall {
       const filePath = getStringArg(args, "filePath", "file_path");
       const fileLabel = filePath ? basename(filePath) : "file";
       const edits = normalizedTool === "multiedit" ? getArrayArg(args, "edits") : undefined;
+      // Codex reports file changes as a change set instead of one file path.
+      const changesSummary = summarizeChanges(getArrayArg(args, "changes") ?? []);
       return {
         toolName: "Edit",
-        summary: edits
-          ? `${fileLabel} (${edits.length} edit${edits.length === 1 ? "" : "s"})`
-          : fileLabel,
+        summary:
+          changesSummary ??
+          (edits
+            ? `${fileLabel} (${edits.length} edit${edits.length === 1 ? "" : "s"})`
+            : fileLabel),
         icon: "pencil",
         getDetails: () => ({ args, output }),
       };

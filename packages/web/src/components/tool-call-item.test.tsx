@@ -134,6 +134,47 @@ describe("ToolCallItem", () => {
     );
   });
 
+  it("renders the codex file-change diff as output and strips the raw change set", () => {
+    const changes = [
+      { path: "/workspace/src/app.ts", kind: { type: "update" }, diff: "@@ -1 +1 @@\n-old\n+new" },
+    ];
+    const output = "/workspace/src/app.ts:\n@@ -1 +1 @@\n-old\n+new";
+    const event: Extract<SandboxEvent, { type: "tool_call" }> = {
+      type: "tool_call",
+      sandboxId: "sandbox-1",
+      messageId: "message-1",
+      callId: "call-1",
+      tool: "edit",
+      args: { changes },
+      output,
+      timestamp: 1,
+    };
+
+    render(<ToolCallItem event={event} isExpanded onToggle={() => {}} />);
+
+    expect(screen.queryByText("Arguments:")).not.toBeInTheDocument();
+    const outputPre = screen.getByText("Output:").nextElementSibling;
+    expect(outputPre?.textContent).toBe(output);
+  });
+
+  it("keeps the codex change set visible when no diff output was rendered", () => {
+    const changes = [{ path: "/workspace/src/app.ts", kind: "update", diff: "" }];
+    const event: Extract<SandboxEvent, { type: "tool_call" }> = {
+      type: "tool_call",
+      sandboxId: "sandbox-1",
+      messageId: "message-2",
+      callId: "call-2",
+      tool: "edit",
+      args: { changes },
+      timestamp: 1,
+    };
+
+    render(<ToolCallItem event={event} isExpanded onToggle={() => {}} />);
+
+    const argumentsPre = screen.getByText("Arguments:").nextElementSibling;
+    expect(argumentsPre?.textContent).toBe(JSON.stringify({ changes }, null, 2));
+  });
+
   it("does not derive a pull request result from truncated output", () => {
     const event: Extract<SandboxEvent, { type: "tool_call" }> = {
       type: "tool_call",

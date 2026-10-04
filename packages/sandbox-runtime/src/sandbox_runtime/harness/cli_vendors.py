@@ -11,7 +11,8 @@ Session continuity differs by vendor:
 
 - One-shot turns: Codex creates the conversation itself (the id rides the
   first stdout record), Pi accepts a client-chosen ``--session-id``, and
-  ZCode's CLI exposes no resume switch (every turn is a fresh conversation).
+  ZCode takes a persisted id back through ``--resume`` (its one-shot stream
+  carries no id to capture, so an id can only originate from a resident run).
 - Resident servers: Codex threads and ZCode sessions are created server-side
   and resumed by id after a restart; Pi's session id is chosen up front at
   spawn (``--session-id``) and confirmed by ``get_state``.
@@ -167,6 +168,26 @@ _CODEX_ITEM_FIELD_RENAMES = {
         "processId": "process_id",
         "durationMs": "duration_ms",
     },
+}
+
+# App-server stream notifications carry their incremental payload as flat
+# params keys instead of an ``item`` body; each key listed here is copied onto
+# the adapted record so the one-shot translator reads one shape. The reasoning
+# entry is the visible thinking trail — the raw ``textDelta`` counterpart is
+# provider-internal reasoning Codex keeps hidden and is deliberately not
+# carried, and the summary also rides item.completed.
+_CODEX_DELTA_KEYS = {
+    "item/reasoning/summaryTextDelta": ("itemId", "summaryIndex", "delta"),
+    "item/agentMessage/delta": ("itemId", "delta"),
+    "item/commandExecution/outputDelta": ("itemId", "delta"),
+}
+
+# turn/plan/updated step statuses (camelCase on the wire) against the TodoWrite
+# status vocabulary every other harness reports.
+_CODEX_PLAN_STATUS = {
+    "pending": "pending",
+    "inProgress": "in_progress",
+    "completed": "completed",
 }
 
 
@@ -347,6 +368,10 @@ class CodexVendor:
             if isinstance(total, dict):
                 state.tokens = _usage_tokens(total)
             return []
+        if method == "turn/plan/updated":
+            # The plan rides a notification of its own (there is no plan item);
+            # forward it as the TodoWrite call the task panels already read.
+            return self._plan_events(message.get("params", {}), state)
         record = self._exec_record(message)
         if method == "turn/started":
             turn = message.get("params", {}).get("turn", {})
@@ -360,6 +385,40 @@ class CodexVendor:
             events = self.parse_record(record, state)
             raise CliTurnSettled(events)
         return self.parse_record(record, state)
+
+    def _plan_events(self, params: dict[str, Any], state: CliTurnState) -> list[Any]:
+        plan = params.get("plan")
+        if not isinstance(plan, list):
+            return []
+        todos: list[dict[str, Any]] = []
+        for step in plan:
+            if not isinstance(step, dict):
+                continue
+            content = step.get("step")
+            if not isinstance(content, str) or not content:
+                continue
+            todo: dict[str, Any] = {"content": content}
+            status = step.get("status")
+            mapped = _CODEX_PLAN_STATUS.get(status) if isinstance(status, str) else None
+            if mapped is not None:
+                todo["status"] = mapped
+            todos.append(todo)
+        if plan and not todos:
+            # A populated plan with nothing readable must not clobber a
+            # previously shown plan. An empty plan is a deliberate clear.
+            return []
+        status = (
+            "completed"
+            if todos and all(todo.get("status") == "completed" for todo in todos)
+            else "running"
+        )
+        return tool_events(
+            state,
+            call_id="plan",
+            name="TodoWrite",
+            args={"todos": todos},
+            status=status,
+        )
 
     def interrupt_messages(
         self, *, session_id: str | None, state: CliTurnState | None
@@ -398,6 +457,15 @@ class CodexVendor:
         params = message.get("params", {})
         record: dict[str, Any] = {"type": method.replace("/", ".")}
         item = params.get("item")
+        if method == "item/fileChange/patchUpdated":
+            # The notification carries the full replacement change set with no
+            # item body; synthesize the file_change item the one-shot parser
+            # already understands.
+            item = {
+                "id": params.get("itemId"),
+                "type": "file_change",
+                "changes": params.get("changes"),
+            }
         if isinstance(item, dict):
             adapted = dict(item)
             item_type = adapted.get("type")
@@ -420,12 +488,12 @@ class CodexVendor:
         error = params.get("error")
         if isinstance(error, dict) and error:
             record["error"] = error
-        if method == "item/reasoning/summaryTextDelta":
-            # The visible thinking trail; the raw ``textDelta`` counterpart is
-            # provider-internal reasoning Codex keeps hidden, so it is not
-            # carried. The summary also rides item.completed, which the
-            # one-shot exec stream emits without these deltas.
-            for key in ("itemId", "summaryIndex", "delta"):
+        keys = _CODEX_DELTA_KEYS.get(method)
+        if keys is not None:
+            # Flat incremental payloads (agent text, command output, reasoning
+            # summary) are copied onto the record so the one-shot parser reads
+            # one shape for both transports.
+            for key in keys:
                 if key in params:
                     record[key] = params[key]
         return record
@@ -465,6 +533,39 @@ class CodexVendor:
                 key = f"{record.get('itemId') or 'reasoning'}:{record.get('summaryIndex')}"
                 state.reasoning_texts[key] = state.reasoning_texts.get(key, "") + delta
                 return thinking_events(state, _joined_reasoning(state))
+            return []
+        if kind == "item.agentMessage.delta":
+            # Live answer text: the app-server streams it per delta while the
+            # one-shot exec stream only prints the finished item. Cumulative
+            # emission matches every other text path here.
+            delta = record.get("delta")
+            if isinstance(delta, str) and delta:
+                key = str(record.get("itemId") or "agent")
+                state.agent_texts[key] = state.agent_texts.get(key, "") + delta
+                return text_events(state, "".join(state.agent_texts.values()))
+            return []
+        if kind == "item.commandExecution.outputDelta":
+            # Live command output; the same card is re-emitted with the
+            # accumulated text and the cached name/args from item.started.
+            delta = record.get("delta")
+            if isinstance(delta, str) and delta:
+                call_id = str(record.get("itemId") or "tool")
+                state.tool_outputs[call_id] = state.tool_outputs.get(call_id, "") + delta
+                return tool_events(
+                    state,
+                    call_id=call_id,
+                    name="",
+                    args=None,
+                    status="running",
+                    output=state.tool_outputs[call_id],
+                )
+            return []
+        if kind == "item.fileChange.patchUpdated":
+            item = record.get("item")
+            if isinstance(item, dict):
+                # The change set is cumulative on the wire and the card is
+                # upserted by call id, so the running edit stays one event.
+                return self._tool_events(item, state, running=True)
             return []
         if kind == "turn.completed":
             # The app-server reports every terminal turn through this one
@@ -517,6 +618,10 @@ class CodexVendor:
         status = "running" if running else _codex_status(item.get("status"))
         if item_type == "command_execution":
             output = _as_text(item.get("aggregated_output") or item.get("output"))
+            if not output:
+                # The streamed outputDelta deltas are the only copy the
+                # app-server keeps; the completed item may carry none.
+                output = state.tool_outputs.get(call_id, "")
             return tool_events(
                 state,
                 call_id=call_id,
@@ -532,7 +637,7 @@ class CodexVendor:
                 name="edit",
                 args={"changes": item.get("changes")},
                 status=status,
-                output=_as_text(item.get("output")),
+                output=_as_text(item.get("output")) or _codex_changes_output(item.get("changes")),
             )
         if item_type == "mcp_tool_call":
             return tool_events(
@@ -542,6 +647,20 @@ class CodexVendor:
                 args=item.get("arguments") if isinstance(item.get("arguments"), dict) else {},
                 status=status,
                 output=_as_text(item.get("result")),
+            )
+        if item_type == "web_search":
+            # Codex reports a search/open/find action with no status field;
+            # the pair of item events carries the progress instead.
+            args: dict[str, Any] = {"query": item.get("query")}
+            action = item.get("action")
+            if isinstance(action, dict):
+                args["action"] = action
+            return tool_events(
+                state,
+                call_id=call_id,
+                name="WebSearch",
+                args=args,
+                status="running" if running else "completed",
             )
         return []
 
@@ -900,9 +1019,10 @@ class ZcodeVendor:
     notifications until ``turn.completed``/``turn.failed``.
 
     One-shot turns remain plain text: ``--prompt`` runs one headless turn
-    (permission mode defaults to ``yolo`` under it, so no approvals) and
-    carries no session id on the stream, so every one-shot turn is a fresh
-    conversation. Custom providers ride the CLI's personal provider config —
+    (permission mode defaults to ``yolo`` under it, so no approvals).
+    ``--resume <id>`` is accepted on this path too, but the stream never
+    reports the session id, so an id can only be captured from a resident
+    run. Custom providers ride the CLI's personal provider config —
     ZCode offers no environment seam for endpoints or keys, so unlike the
     other vendors the api-key rides the file as a literal; one-shot turns
     rewrite its ``defaultModelSelection`` before each spawn while resident
@@ -1060,6 +1180,14 @@ class ZcodeVendor:
             # keys and is deliberately not reported as a compaction.
             if isinstance(payload.get("boundaryId"), str) and "summarizedMessageCount" in payload:
                 return [{"type": "context_compacted", "messageId": state.message_id}]
+            return []
+        if kind == "session.titleUpdated":
+            # The server names the session once its first turn produced
+            # content; the title also rides the session record, but only this
+            # event announces it live.
+            title = payload.get("title")
+            if isinstance(title, str) and title:
+                return [{"type": "session_title", "title": title}]
             return []
         if kind == "tool.updated":
             return self._tool_updated_events(payload, state)
@@ -1232,6 +1360,27 @@ def _codex_status(status: Any) -> str:
     if status == "completed":
         return "completed"
     return "running"
+
+
+def _codex_changes_output(changes: Any) -> str:
+    """Render a codex file-change set as text for the output pane.
+
+    The per-file diffs live in structured args so the web can summarize them;
+    mirroring them into the output keeps the raw diff visible without an
+    expander for the args JSON.
+    """
+    if not isinstance(changes, list):
+        return ""
+    parts: list[str] = []
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        diff = _as_text(change.get("diff"))
+        if not diff:
+            continue
+        path = change.get("path")
+        parts.append(f"{path}:\n{diff}" if isinstance(path, str) and path else diff)
+    return "\n".join(parts)
 
 
 def _pi_has_tool_calls(message: dict[str, Any]) -> bool:

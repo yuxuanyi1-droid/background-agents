@@ -54,14 +54,22 @@ function ToolIcon({ name }: { name: string | null }) {
 
 function ToolCallDetails({ event }: { event: ToolCallItemProps["event"] }) {
   const formatted = formatToolCall(event);
-  const isApplyPatch = event.tool?.toLowerCase() === "apply_patch";
+  const normalizedTool = event.tool?.toLowerCase();
+  const isApplyPatch = normalizedTool === "apply_patch";
   const truncatedArgs = event.truncated?.fields.some((field) => field.startsWith("args."));
   const truncatedOutput = event.truncated?.fields.includes("output");
   const { args, output } = formatted.getDetails();
   const patchText = isApplyPatch && typeof args?.patchText === "string" ? args.patchText : null;
+  // Codex edits carry their diffs in args.changes, which the output pane
+  // already renders; hide the raw set there rather than dumping it twice.
+  const isCodexEdit = normalizedTool === "edit" && Array.isArray(args?.changes) && !!output;
   const nonPatchArgs =
-    isApplyPatch && args
-      ? Object.fromEntries(Object.entries(args).filter(([key]) => key !== "patchText"))
+    args && (isApplyPatch || isCodexEdit)
+      ? Object.fromEntries(
+          Object.entries(args).filter(([key]) =>
+            isApplyPatch ? key !== "patchText" : key !== "changes"
+          )
+        )
       : args;
   const hasNonPatchArgs = !!nonPatchArgs && Object.keys(nonPatchArgs).length > 0;
 
